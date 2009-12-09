@@ -96,14 +96,17 @@ _shift_arg = r'''
 '''.lstrip();
 
 _offset_template = r'''
-%(name)s.offset[%(dim)d] = block / (%(dims)s / %(dimsize)d);
-'''.lstrip();
+numblocks = (%(dims)s) / %(size)d;
+blockpos = rest / numblocks;
+%(name)s.offset[%(dim)d] = blockpos * %(size)d;
+rest -= blockpos * numblocks;
+'''.strip();
 
 _kernel_body = r'''
 unsigned int thread_id = threadIdx.x;
 unsigned int total_threads = gridDim.x*blockDim.x;
 unsigned int memory_start = blockDim.x*blockIdx.x;
-unsigned int block, blocks_per_thread, end;
+unsigned int block, blocks_per_thread, end, rest, blockpos, numblocks;
 
 %(declarations)s
 
@@ -212,11 +215,15 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
             if shape:
                 blockinit.append(_shift_arg % {'name': arg, 'type': types[arg][1]})
                 arg = '__shifted_' + arg
-                for dim in range(len(shape)):
+                offsetinit.append('rest = block;')
+                for dim, size in enumerate(shape):
+                    if dim == len(shape) - 1:
+                        offsetinit.append('%s.offset[%d] = rest * %d;\n' % (arg, dim, size))
+                        break
                     dims = ' * '.join('%s.dim[%d]' % (arg, subdim)
                                       for subdim in range(dim+1, len(shape)))
                     offsetinit.append(_offset_template % {'name': arg, 'dim': dim,
-                                      'dims': dims, 'dimsize': shape[dim]})
+                                                          'dims': dims, 'size': size})
                 arg = '&' + arg
             args.append(arg)
         bodydata = {
