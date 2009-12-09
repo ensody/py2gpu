@@ -66,8 +66,9 @@ typedef %(Type)sArrayStruct* %(Type)sArray;
 '''.lstrip()
 
 _typedefs = r'''
-#define sync _synchronize
-''' + '\n'.join(_typedef_base % {'type': name, 'Type': name.capitalize()}
+#define sync __synchronize
+
+'''.lstrip() + '\n'.join(_typedef_base % {'type': name, 'Type': name.capitalize()}
                 for name in ['int', 'float']) + '\n\n'
 
 intpsize = numpy.intp(0).nbytes
@@ -138,14 +139,14 @@ def make_gpu_func(mod, name, info):
     types = info['types']
     argnames = inspect.getargspec(info['func']).args
     argtypes = ''.join(types[arg][0] for arg in argnames) + 'i'
-    func.prepare(argtypes, BLOCK)
+    func.prepare(argtypes, (1, 1, 1))
     def _gpu_func(*args):
         kernel_args = []
         arrays = []
         grid = (1, 1, 1)
         count, block = 0, 0
         for argname, arg in zip(argnames, args):
-            if isinstance(arg, numpy.array):
+            if isinstance(arg, numpy.ndarray):
                 arg = GPUArray(arg)
                 arrays.append(arg)
             if isinstance(arg, GPUArray):
@@ -167,12 +168,12 @@ def make_gpu_func(mod, name, info):
                                           (numpy.array(shape) - 1)).prod()
                     else:
                         assert not any(dim1 % dim2 for dim1, dim2
-                                       in zip(shape, arg.data.shape)), \
+                                       in zip(arg.data.shape, shape)), \
                             'Size of argument "%s" must be an integer ' \
                             'multiple of its block size when using ' \
                             'non-overlapping blocks.' % argname
                         # TODO: reorder pixels for locality
-                        blockcount /= numpy.array(shape).prod()
+                        blockcount = arg.data.size / numpy.array(shape).prod()
                     if count:
                         assert count == blockcount, \
                             'Number of blocks of argument "%s" ' \
@@ -190,7 +191,7 @@ def make_gpu_func(mod, name, info):
         for gpuarray in arrays:
             # TODO: reverse reordering if needed
             gpuarray.copy_to_host()
-    return func
+    return _gpu_func
 
 def make_emulator_func(func):
     def emulator(*args):
