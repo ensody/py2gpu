@@ -7,6 +7,7 @@ from pymeta.runtime import ParseError, EOFError
 
 # Globals for storing type information about registered functions
 _gpu_funcs = {}
+_no_bounds_check = object()
 
 class Py2GPUParseError(ValueError):
     pass
@@ -23,8 +24,8 @@ num = node('Num'):n -> str(n.n)
 sub = node('Sub') -> '-'
 call = node('Call'):n -> self.gen_call(n)
 
-subscript = node('Subscript'):n !(self.parse(n.value, 'name')):name
-    -> '%s->data[%s]' % (name, self.gen_subscript(name, self.parse(n.slice, 'index')))
+subscript :assign = node('Subscript'):n !(self.parse(n.value, 'name')):name
+    -> self.gen_subscript(name, self.parse(n.slice, 'index'), assign)
 index = node('Index'):n -> self.parse(n.value, 'subscriptindex')
 subscriptindex = op:n -> [n]
                | tupleslice
@@ -37,10 +38,12 @@ op = add
    | name
    | num
    | sub
-   | subscript
+   | subscript(False)
    | call
 
-assign = node('Assign'):n ?(len(n.targets) == 1) -> '%s = %s' % (self.parse(n.targets[0], 'op'), self.parse(n.value, 'op'))
+assignop = name | subscript(True)
+
+assign = node('Assign'):n ?(len(n.targets) == 1) -> '%s = %s' % (self.parse(n.targets[0], 'assignop'), self.parse(n.value, 'op'))
 expr = node('Expr'):n -> self.parse(n.value, 'op')
 functiondef 0 = node('FunctionDef'):n -> self.gen_func(n, 0)
 
@@ -52,7 +55,7 @@ body :i = bodyitem(i)+:xs -> '\n'.join(xs) + '\n'
 grammar = node('Module'):n -> self.parse(n.body, 'body', 0)
 '''
 
-def convert(code):
+def convert(code, codestring=''):
     if isinstance(code, ast.AST):
         tree = code
     else:
@@ -60,7 +63,7 @@ def convert(code):
     try:
         converted = Py2GPUGrammar([]).parse(tree)
     except ParseError, e:
-        lines = code.split('\n')
+        lines = codestring.split('\n')
         start, stop = max(0, e.position-1), min(len(lines), e.position+2)
         snippet = '\n'.join(lines[start:stop])
         raise Py2GPUParseError('Parse error at line %d (%s):\n%s' % (e.position, str(e), snippet))
@@ -96,26 +99,22 @@ _shift_arg = r'''
 '''.lstrip();
 
 _offset_template = r'''
-numblocks = (%(dims)s) / %(size)d;
+numblocks = (%(dims)s) / (%(size)s);
 blockpos = rest / numblocks;
-%(name)s.offset[%(dim)d] = blockpos * %(size)d;
+%(name)s.offset[%(dim)d] = blockpos * %(dimlength)d;
 rest -= blockpos * numblocks;
 '''.strip();
 
 _kernel_body = r'''
 unsigned int thread_id = threadIdx.x;
 unsigned int total_threads = gridDim.x*blockDim.x;
-unsigned int memory_start = blockDim.x*blockIdx.x;
+unsigned int start_block = blockDim.x*blockIdx.x;
 unsigned int block, blocks_per_thread, end, rest, blockpos, numblocks;
 
 %(declarations)s
 
-if (count > total_threads)
-    blocks_per_thread = (count + total_threads - 1) / total_threads;
-else
-    blocks_per_thread = 1;
-
-block = memory_start + thread_id;
+blocks_per_thread = (count + total_threads - 1) / total_threads;
+block = start_block + thread_id;
 end = block + blocks_per_thread;
 
 if (end > count)
@@ -158,32 +157,53 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
             'Parse error at line %d, col %d (node %s)%s' % (
                 lineno, col_offset, node.__class__.__name__, message))
 
+    @property
+    def func_name(self):
+        return getattr(self, '_func_name', None)
+
     def parse(self, data, rule='grammar', *args):
         # print data, rule
         if not isinstance(data, (tuple, list)):
             data = (data,)
         try:
             grammar = self.__class__(data)
-            grammar._func_name = getattr(self, '_func_name', None)
+            grammar._func_name = self.func_name
             result, error = grammar.apply(rule, *args)
         except ParseError:
-            raise_parse_error(data, None, 'Unsupported node type')
+            self.raise_parse_error(data, None, 'Unsupported node type')
         try:
             head = grammar.input.head()
         except EOFError:
             pass
         else:
-            raise_parse_error(head[0], error)
+            self.raise_parse_error(head[0], error)
         return result
 
-    def gen_subscript(self, name, indices):
+    def gen_subscript(self, name, indices, assigning):
         dims = len(indices)
         access = []
+        shifted_indices = []
         for dim, index in enumerate(indices):
             index = '(%s->offset[%d] + %s)' % (name, dim, index)
+            shifted_indices.append(index)
             access.append(' * '.join(['%s->dim[%d]' % (name, subdim)
                                       for subdim in range(dim+1, dims)] + [index]))
-        return ' + '.join(access)
+        subscript = '%s->data[%s]' % (name, ' + '.join(access))
+
+        # Check bounds, if necessary
+        info = _gpu_funcs[self.func_name]
+        default = info['out_of_bounds_value']
+        if default is not _no_bounds_check:
+            blockshape = info['blockshapes'].get(name)
+            if blockshape is not None and blockshape != (1,) * len(blockshape):
+                bounds_check = ' && '.join('%s %s' % (index, check)
+                                           for check in ('>= 0', '< %s->dim[%d]' % (name, dim))
+                                           for dim, index in enumerate(shifted_indices))
+                if assigning:
+                    subscript = 'if (%s) %s' % (bounds_check, subscript)
+                else:
+                    subscript = '(%s ? %s : %s)' % (bounds_check, subscript, default)
+        return subscript
 
     def gen_func(self, func, level):
         name = func.name
@@ -209,6 +229,8 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         blockinit = []
         offsetinit = []
         blockshapes = info['blockshapes']
+        overlapping = info['overlapping']
+        center_as_origin = info['center_as_origin']
         for arg in func.args.args:
             arg = arg.id
             shape = blockshapes.get(arg)
@@ -216,14 +238,27 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
                 blockinit.append(_shift_arg % {'name': arg, 'type': types[arg][1]})
                 arg = '__shifted_' + arg
                 offsetinit.append('rest = block;')
-                for dim, size in enumerate(shape):
+                for dim, dimlength in enumerate(shape):
+                    if overlapping:
+                        dimlength = 1
                     if dim == len(shape) - 1:
-                        offsetinit.append('%s.offset[%d] = rest * %d;\n' % (arg, dim, size))
+                        offsetinit.append('%s.offset[%d] = rest * %d;\n' % (
+                            arg, dim, dimlength))
                         break
-                    dims = ' * '.join('%s.dim[%d]' % (arg, subdim)
-                                      for subdim in range(dim+1, len(shape)))
+                    if overlapping and not center_as_origin:
+                        dims = ' * '.join('(%s.dim[%d] - %d)' % (arg, subdim, shape[subdim] - 1)
+                                          for subdim in range(dim+1, len(shape)))
+                    else:
+                        dims = ' * '.join('%s.dim[%d]' % (arg, subdim)
+                                          for subdim in range(dim+1, len(shape)))
+                    if overlapping:
+                        size = '1'
+                    else:
+                        size = ' * '.join('%d' % shape[subdim]
+                                          for subdim in range(dim+1, len(shape)))
                     offsetinit.append(_offset_template % {'name': arg, 'dim': dim,
-                                                          'dims': dims, 'size': size})
+                                                          'dims': dims, 'size': size,
+                                                          'dimlength': dimlength})
                 arg = '&' + arg
             args.append(arg)
         bodydata = {

@@ -6,7 +6,9 @@ import pycuda.autoinit
 from pycuda import driver
 from pycuda.compiler import SourceModule
 from pycuda.gpuarray import splay
-from py2gpu.grammar import _gpu_funcs, convert, make_prototype
+from py2gpu.grammar import _gpu_funcs, convert, make_prototype, _no_bounds_check
+
+# TODO: implement reduction support
 
 def _simplify(mapping):
     simple = {}
@@ -22,7 +24,8 @@ def _rename_func(tree, name):
     tree.body[0].name = name
     return tree
 
-def blockwise(blockshapes, types, overlapping=True, center_as_origin=False, name=None):
+def blockwise(blockshapes, types, overlapping=True, center_as_origin=False,
+              out_of_bounds_value=_no_bounds_check, name=None):
     blockshapes = _simplify(blockshapes)
     types = _simplify(types)
     assert overlapping or not center_as_origin, \
@@ -35,14 +38,17 @@ def blockwise(blockshapes, types, overlapping=True, center_as_origin=False, name
         if not fname:
             fname = func.__name__
         assert fname not in _gpu_funcs, 'The function "%s" has already been registered!' % fname
+        source = inspect.getsource(func)
         info = _gpu_funcs.setdefault(fname, {
             'func': func,
             'functype': 'blockwise',
             'blockshapes': blockshapes,
             'overlapping': overlapping,
             'center_as_origin': center_as_origin,
+            'out_of_bounds_value': out_of_bounds_value,
+            'source': source,
             'types': types,
-            'tree': _rename_func(ast.parse(inspect.getsource(func)), fname),
+            'tree': _rename_func(ast.parse(source), fname),
             'prototypes': {},
         })
         def _call_blockwise(*args):
@@ -67,6 +73,8 @@ typedef %(Type)sArrayStruct* %(Type)sArray;
 
 _typedefs = r'''
 #define sync __synchronize
+#define BLOCK_INDEX blockIdx.x
+#define THREAD_INDEX threadIdx.x
 
 '''.lstrip() + '\n'.join(_typedef_base % {'type': name, 'Type': name.capitalize()}
                 for name in ['int', 'float']) + '\n\n'
@@ -76,8 +84,13 @@ int32size = numpy.int32(0).nbytes
 
 class GPUArray(object):
     size = intpsize + (4 + 4 + 1 + 1) * int32size
-    def __init__(self, data):
+    def __init__(self, data, dtype=None):
         self.data = data
+        if dtype:
+            data = data.astype(dtype)
+        else:
+            dtype = data.dtype
+        self.dtype = dtype
 
         # Copy array to device
         self.pointer = driver.mem_alloc(self.size)
@@ -101,35 +114,38 @@ class ArrayType(object):
     pass
 
 class IntArray(ArrayType):
-    pass
+    dtype = numpy.int32
 
 class FloatArray(ArrayType):
-    pass
+    dtype = numpy.float32
 
 def get_arg_type(arg):
     if issubclass(arg, ArrayType):
-        return "P", arg.__name__
+        return "P", arg.__name__, numpy.dtype(arg.dtype)
+    dtype = numpy.dtype(arg.dtype)
     if issubclass(arg, numpy.int8):
-        return "b", 'char'
-    if issubclass(arg, numpy.uint8):
-        return "B", 'unsigned char'
-    if issubclass(arg, numpy.int16):
-        return "h", 'short'
-    if issubclass(arg, numpy.uint16):
-        return "H", 'unsigned short'
-    if issubclass(arg, (int, numpy.int32)):
-        return "i", 'int'
-    if issubclass(arg, numpy.uint32):
-        return "I", 'unsigned int'
-    if issubclass(arg, (long, numpy.int64)):
-        return "l", 'long'
-    if issubclass(arg, numpy.uint64):
-        return "L", 'unsigned long'
-    if issubclass(arg, (float, numpy.float32)):
-        return "f", 'float'
-    if issubclass(arg, numpy.float64):
-        return "d", 'double'
-    raise ValueError("Unknown type '%r'" % tp)
+        cname = 'char'
+    elif issubclass(arg, numpy.uint8):
+        cname = 'unsigned char'
+    elif issubclass(arg, numpy.int16):
+        cname = 'short'
+    elif issubclass(arg, numpy.uint16):
+        cname = 'unsigned short'
+    elif issubclass(arg, (int, numpy.int32)):
+        cname = 'int'
+    elif issubclass(arg, numpy.uint32):
+        cname = 'unsigned int'
+    elif issubclass(arg, (long, numpy.int64)):
+        cname = 'long'
+    elif issubclass(arg, numpy.uint64):
+        cname = 'unsigned long'
+    elif issubclass(arg, numpy.float32):
+        cname = 'float'
+    elif issubclass(arg, (float, numpy.float64)):
+        cname = 'double'
+    else:
+        raise ValueError("Unknown type '%r'" % tp)
+    return dtype.char, cname, dtype
 
 def make_gpu_func(mod, name, info):
     func = mod.get_function('_kernel_' + name)
@@ -147,12 +163,15 @@ def make_gpu_func(mod, name, info):
         count, block = 0, 0
         for argname, arg in zip(argnames, args):
             if isinstance(arg, numpy.ndarray):
-                arg = GPUArray(arg)
+                arg = GPUArray(arg, dtype=types[argname][2])
                 arrays.append(arg)
             if isinstance(arg, GPUArray):
+                assert arg.dtype == types[argname][2], \
+                    "The data type (%s) of the argument %s doesn't match " \
+                    'the function definition (%s)' % (arg.dtype, argname, types[argname][2])
                 shape = blockshapes.get(argname)
                 if shape:
-                    if overlapping and shape == (1,) * len(shape):
+                    if overlapping and shape != (1,) * len(shape):
                         # TODO: read pixels into shared memory by running
                         # shape[1:].prod() threads that read contiguous lines
                         # of memory, sync(), and then let only the first
@@ -176,10 +195,10 @@ def make_gpu_func(mod, name, info):
                         blockcount = arg.data.size / numpy.array(shape).prod()
                     if count:
                         assert count == blockcount, \
-                            'Number of blocks of argument "%s" ' \
+                            'Number of blocks of argument "%s" (%d) ' \
                             "doesn't match the preceding blockwise " \
-                            'arguments.' % argname
-                    count = blockcount
+                            'arguments (%d).' % (argname, blockcount, count)
+                    count = int(blockcount)
                 arg = arg.pointer
             kernel_args.append(arg)
         # Determine number of blocks
@@ -203,7 +222,7 @@ def make_emulator_func(func):
 def compile_gpu_code():
     source = ['\n\n']
     for name, info in _gpu_funcs.items():
-        source.append(convert(info['tree']))
+        source.append(convert(info['tree'], info['source']))
         source.insert(0, ';\n'.join(info['prototypes'].values()) + ';\n')
     source.insert(0, _typedefs)
     print ''.join(source)
