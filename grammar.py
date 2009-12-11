@@ -15,40 +15,70 @@ class Py2GPUParseError(ValueError):
 py2gpu_grammar = r'''
 node :name = :n ?(n.__class__.__name__ == name) -> n
 
+attribute = node('Attribute'):n -> '%s->%s' % (self.parse(n.value, 'name'), n.attr)
+name = node('Name'):n -> name_mapper.get(n.id, n.id)
+varaccess = attribute | name
+num = node('Num'):n -> str(n.n)
+
+binop = node('BinOp'):n -> '(%s %s %s)' % (self.parse(n.left, 'op'), self.parse(n.op, 'binaryop'), self.parse(n.right, 'op'))
+binaryop = add | div | mult | sub
 add = node('Add') -> '+'
-binop = node('BinOp'):n -> '(%s %s %s)' % (self.parse(n.left, 'op'), self.parse(n.op, 'op'), self.parse(n.right, 'op'))
 div = node('Div') -> '/'
 mult = node('Mult') -> '*'
-name = node('Name'):n -> n.id
-num = node('Num'):n -> str(n.n)
 sub = node('Sub') -> '-'
+
+unaryop = node('UnaryOp'):n -> '%s(%s)' % (self.parse(n.op, 'anyunaryop'), self.parse(n.operand, 'op'))
+anyunaryop = usub | not
+not = node('Not') -> '!'
+usub = node('USub') -> '-'
+
+boolop = node('BoolOp'):n -> (' %s ' % self.parse(n.op, 'anyboolop')).join(['(%s)' % self.parse(value, 'op') for value in n.values])
+anyboolop = and | or
+and = node('And') -> '&&'
+or = node('Or') -> '||'
+
+compare = node('Compare'):n -> '(%s %s %s)' % (self.parse(n.left, 'op'), self.parse(n.ops[0], 'compareop'), self.parse(n.comparators[0], 'op'))
+compareop = eq | noteq | gt | gte | lt | lte
+eq = (node('Eq') | node('Is')) -> '=='
+noteq = (node('NotEq') | node('IsNot')) -> '!='
+gt = node('Gt') -> '>'
+gte = node('GtE') -> '>='
+lt = node('Lt') -> '<'
+lte = node('LtE') -> '<='
+
 call = node('Call'):n -> self.gen_call(n)
 
-subscript :assign = node('Subscript'):n !(self.parse(n.value, 'name')):name
+subscript :assign = node('Subscript'):n !(self.parse(n.value, 'varaccess')):name
     -> self.gen_subscript(name, self.parse(n.slice, 'index'), assign)
 index = node('Index'):n -> self.parse(n.value, 'subscriptindex')
 subscriptindex = op:n -> [n]
                | tupleslice
 tupleslice = node('Tuple'):n -> [self.parse(index, 'op') for index in n.elts]
 
-op = add
-   | binop
-   | div
-   | mult
-   | name
-   | num
-   | sub
+op = binop
+   | unaryop
+   | boolop
    | subscript(False)
+   | varaccess
+   | num
    | call
+   | compare
 
 assignop = name | subscript(True)
-
 assign = node('Assign'):n ?(len(n.targets) == 1) -> '%s = %s' % (self.parse(n.targets[0], 'assignop'), self.parse(n.value, 'op'))
 expr = node('Expr'):n -> self.parse(n.value, 'op')
 functiondef 0 = node('FunctionDef'):n -> self.gen_func(n, 0)
 
-bodyitem :i = (assign
-               | expr):n -> indent(i) + n + ';'
+if :i = node('If'):n -> 'if (%s) {\n%s%s}%s' % (self.parse(n.test, 'op'), self.parse(n.body, 'body', i+1), indent(i), self.parse(n, 'else', i))
+else :i = node('If'):n -> ' else {\n%s%s}' % (self.parse(n.orelse, 'body', i+1), indent(i)) if n.orelse else ''
+
+for :i = node('For'):n -> self.gen_for(n, i)
+range = node('Call'):n ?(self.parse(n.func, 'name') == 'range') ?(not n.keywords and not n.starargs and not n.kwargs) -> [self.parse(arg, 'op') for arg in n.args]
+
+while :i = node('While'):n -> self.gen_while(n, i)
+
+bodyitem :i = (assign | expr):n -> indent(i) + n + ';'
+            | (if(i) | for(i) | while(i)):n -> indent(i) + n
             | functiondef(i)
 body :i = bodyitem(i)+:xs -> '\n'.join(xs) + '\n'
 
@@ -79,10 +109,27 @@ def indent_source(level, source=''):
 def p(*x):
     print x
 
+name_mapper = {
+    'None': 'null',
+    'True': 'true',
+    'False': 'false',
+}
+
 vars = {
     'indent': indent,
     'p': p,
+    'name_mapper': name_mapper,
 }
+
+_for_loop = r'''
+for (int %(name)s=%(start)s; %(name)s < %(stop)s; %(name)s += %(step)s) {
+%(body)s%(indent)s}
+'''.strip()
+
+_while_loop = r'''
+while (%(test)s) {
+%(body)s%(indent)s}
+'''.strip()
 
 _func_prototype = r'''
 %(func_type)s void %(name)s(%(args)s)
@@ -162,7 +209,7 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         return getattr(self, '_func_name', None)
 
     def parse(self, data, rule='grammar', *args):
-        # print data, rule
+        print data, rule
         if not isinstance(data, (tuple, list)):
             data = (data,)
         try:
@@ -181,6 +228,9 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
 
     def gen_subscript(self, name, indices, assigning):
         dims = len(indices)
+        if '->' in name:
+            assert dims == 1, 'Attribute values can only be one-dimensional.'
+            return '%s[%s]' % (name, indices[0])
         access = []
         shifted_indices = []
         for dim, index in enumerate(indices):
@@ -276,9 +326,41 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         return source
 
     def gen_call(self, call):
-        name = self.parse(call.func, 'name')
+        name = self.parse(call.func, 'varaccess')
         args = [self.parse(arg, 'op') for arg in call.args]
+        if '->' in name:
+            arg, name = name.split('->', 1)
+            args.insert(0, arg)
+            name = '__array_' + name
         assert call.starargs is None
         assert call.kwargs is None
         assert call.keywords == []
         return '%s(%s)' % (name, ', '.join(args))
+
+    def gen_for(self, node, level):
+        assert not node.orelse, 'else clause not supported in for loops'
+        rangespec = tuple(self.parse(node.iter, 'range'))
+        length = len(rangespec)
+        assert length in range(1, 4), 'range() must get 1-3 parameters'
+        if length == 3:
+            start, stop, step = rangespec
+        elif length == 2:
+            start, stop = rangespec
+            step = 1
+        else:
+            start, step = 0, 1
+            stop = rangespec[0]
+        return _for_loop % {
+            'name': self.parse(node.target, 'name'),
+            'body': self.parse(node.body, 'body', level+1),
+            'indent': indent(level),
+            'start': start, 'stop': stop, 'step': step,
+        }
+
+    def gen_while(self, node, level):
+        assert not node.orelse, 'else clause not supported in for loops'
+        return _while_loop % {
+            'test': self.parse(node.test, 'op'),
+            'body': self.parse(node.body, 'body', level+1),
+            'indent': indent(level),
+        }
