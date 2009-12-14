@@ -11,7 +11,7 @@ def increasing_multiplication(x, y):
 
 @blockwise({'x': (2, 1)}, {'x': IntArray}, overlapping=False)
 def get_index(x):
-    x[0, 0] = BLOCK_INDEX + 1
+    x[0, 0] = CPU_INDEX + 1
     x[1, 0] = THREAD_INDEX + 1001
 
 @blockwise({'x': (1, 1), 'y': (3, 3)}, {('x', 'y'): FloatArray}, overlapping=True)
@@ -38,29 +38,6 @@ def if_center_reducer(x, y):
     if y.offset[1] < y.dim[1]:
         right = y[0, 1]
     x[0, 0] = top + right + bottom + left
-
-def count_binary_labels(img):
-    height, width = img.shape
-    labels = 0
-    for row in range(height):
-        rowlabels = img[row, 0]
-        for col in range(1, width):
-            if img[row, col] == 1:
-                if img[row, col-1] == 0:
-                    rowlabels += 1
-                img[row, col] = rowlabels
-        labels += rowlabels
-        if row > 0:
-            topmatch = 0
-            bottommatch = 0
-            for col in range(width):
-                top = img[row-1, col]
-                bottom = img[row, col]
-                if top > 0 and bottom > 0 and (top != topmatch or bottom != bottommatch):
-                    labels -= 1
-                    topmatch = top
-                    bottommatch = bottom
-    return img
 
 compile_gpu_code()
 

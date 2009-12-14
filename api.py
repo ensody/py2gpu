@@ -7,6 +7,7 @@ from pycuda import driver
 from pycuda.compiler import SourceModule
 from pycuda.gpuarray import splay
 from py2gpu.grammar import _gpu_funcs, convert, make_prototype, _no_bounds_check
+from textwrap import dedent
 
 # TODO: implement reduction support
 
@@ -25,9 +26,13 @@ def _rename_func(tree, name):
     return tree
 
 def blockwise(blockshapes, types, overlapping=True, center_as_origin=False,
-              out_of_bounds_value=_no_bounds_check, name=None):
+              out_of_bounds_value=_no_bounds_check, name=None, reduce=None):
     blockshapes = _simplify(blockshapes)
     types = _simplify(types)
+    if overlapping is True:
+        overlapping = blockshapes.keys()
+    elif isinstance(overlapping, basestring):
+        overlapping = (overlapping,)
     assert overlapping or not center_as_origin, \
         "You can't have overlapping=False and center_as_origin=True"
     for varname, vartype in types.items():
@@ -38,7 +43,7 @@ def blockwise(blockshapes, types, overlapping=True, center_as_origin=False,
         if not fname:
             fname = func.__name__
         assert fname not in _gpu_funcs, 'The function "%s" has already been registered!' % fname
-        source = inspect.getsource(func)
+        source = dedent(inspect.getsource(func))
         info = _gpu_funcs.setdefault(fname, {
             'func': func,
             'functype': 'blockwise',
@@ -73,42 +78,21 @@ typedef %(Type)sArrayStruct* %(Type)sArray;
 
 _typedefs = r'''
 #define sync __synchronize
-#define BLOCK_INDEX blockIdx.x
+#define CPU_INDEX blockIdx.x
+#define CPU_COUNT gridDim.x
 #define THREAD_INDEX threadIdx.x
+#define THREAD_COUNT blockDim.x
+#define __int(x) ((int)(x))
+#define __float(x) ((float)(x))
+#define imax(a, b) max(a, b)
+#define imin(a, b) min(a, b)
+#define abs(x) fabs(x)
 
 '''.lstrip() + '\n'.join(_typedef_base % {'type': name, 'Type': name.capitalize()}
                 for name in ['int', 'float']) + '\n\n'
 
 intpsize = numpy.intp(0).nbytes
 int32size = numpy.int32(0).nbytes
-
-class GPUArray(object):
-    size = intpsize + (4 + 4 + 1 + 1) * int32size
-    def __init__(self, data, dtype=None):
-        self.data = data
-        if dtype:
-            data = data.astype(dtype)
-        else:
-            dtype = data.dtype
-        self.dtype = dtype
-
-        # Copy array to device
-        self.pointer = driver.mem_alloc(self.size)
-
-        # data
-        self.device_data = driver.to_device(data)
-        driver.memcpy_htod(int(self.pointer), numpy.intp(int(self.device_data)))
-
-        # dim
-        struct = data.shape
-        struct += (4 - data.ndim) * (0,)
-        # offset, ndim, size
-        struct += 4 * (0,) + (data.ndim, data.size)
-        struct = numpy.array(struct, dtype=numpy.int32)
-        driver.memcpy_htod(int(self.pointer) + intpsize, buffer(struct))
-
-    def copy_to_host(self):
-        self.data[...] = driver.from_device_like(self.device_data, self.data)
 
 class ArrayType(object):
     pass
@@ -122,7 +106,7 @@ class FloatArray(ArrayType):
 def get_arg_type(arg):
     if issubclass(arg, ArrayType):
         return "P", arg.__name__, numpy.dtype(arg.dtype)
-    dtype = numpy.dtype(arg.dtype)
+    dtype = numpy.dtype(arg)
     if issubclass(arg, numpy.int8):
         cname = 'char'
     elif issubclass(arg, numpy.uint8):
@@ -148,6 +132,10 @@ def get_arg_type(arg):
     return dtype.char, cname, dtype
 
 def make_gpu_func(mod, name, info):
+    if info['types'].get('return'):
+        def _gpu_func(*args):
+            raise ValueError("Functions with a return value can't be called from the CPU.")
+        return _gpu_func
     func = mod.get_function('_kernel_' + name)
     blockshapes = info['blockshapes']
     overlapping = info['overlapping']
@@ -171,7 +159,7 @@ def make_gpu_func(mod, name, info):
                     'the function definition (%s)' % (arg.dtype, argname, types[argname][2])
                 shape = blockshapes.get(argname)
                 if shape:
-                    if overlapping and shape != (1,) * len(shape):
+                    if argname in overlapping and shape != (1,) * len(shape):
                         # TODO: read pixels into shared memory by running
                         # shape[1:].prod() threads that read contiguous lines
                         # of memory, sync(), and then let only the first
@@ -208,8 +196,8 @@ def make_gpu_func(mod, name, info):
         func.prepared_call(grid, *kernel_args)
         # Now copy temporary arrays back
         for gpuarray in arrays:
-            # TODO: reverse reordering if needed
-            gpuarray.copy_to_host()
+            # TODO: reverse pixel reordering if needed
+            gpuarray.copy_from_device()
     return _gpu_func
 
 def make_emulator_func(func):
@@ -225,11 +213,55 @@ def compile_gpu_code():
         source.append(convert(info['tree'], info['source']))
         source.insert(0, ';\n'.join(info['prototypes'].values()) + ';\n')
     source.insert(0, _typedefs)
-    print ''.join(source)
-    mod = SourceModule('\n'.join(source))
+    source = ''.join(source)
+    print '\n' + source
+    mod = SourceModule(source)
     for name, info in _gpu_funcs.items():
         info['gpufunc'] = make_gpu_func(mod, name, info)
 
 def emulate_gpu_code():
     for info in _gpu_funcs.values():
         info['gpufunc'] = make_emulator_func(info['func'])
+
+class GPUArray(object):
+    size = intpsize + (4 + 4 + 1 + 1) * int32size
+    def __init__(self, data, dtype=None, copy_to_device=True):
+        self.data = data
+        if dtype:
+            data = data.astype(dtype)
+        else:
+            dtype = data.dtype
+        self.dtype = dtype
+
+        # Copy array to device
+        self.pointer = driver.mem_alloc(self.size)
+
+        # data
+        if copy_to_device:
+            self.device_data = driver.to_device(data)
+        else:
+            self.device_data = driver.mem_alloc(data.nbytes)
+        driver.memcpy_htod(int(self.pointer), numpy.intp(int(self.device_data)))
+
+        # dim
+        struct = data.shape
+        struct += (4 - data.ndim) * (0,)
+        # offset, ndim, size
+        struct += 4 * (0,) + (data.ndim, data.size)
+        struct = numpy.array(struct, dtype=numpy.int32)
+        driver.memcpy_htod(int(self.pointer) + intpsize, buffer(struct))
+
+    def copy_from_device(self):
+        self.data[...] = driver.from_device_like(self.device_data, self.data)
+
+from py2gpu import arrayfuncs
+def make_array_reduction(name):
+    def _reduction(self):
+        if self.dtype == dtype(numpy.int32):
+            return getattr(arrayfuncs, '__IntArray_' + name)(self)
+        elif self.dtype == dtype(numpy.float32):
+            return getattr(arrayfuncs, '__FloatArray_' + name)(self)
+        else:
+            raise TypeError("Can't handle arrays of dtype %s" % self.dtype)
+for name in arrayfuncs._reductions:
+    setattr(GPUArray, name, make_array_reduction(name))
