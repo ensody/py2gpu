@@ -20,8 +20,8 @@ name = node('Name'):n -> name_mapper.get(n.id, n.id)
 varaccess = attribute | name
 num = node('Num'):n -> str(n.n)
 
-binop = node('BinOp'):n -> '(%s %s %s)' % (self.parse(n.left, 'op'), self.parse(n.op, 'binaryop'), self.parse(n.right, 'op'))
-binaryop = add | div | mult | sub
+binop = node('BinOp'):n -> '(%s %s %s)' % (self.parse(n.left, 'op'), self.parse(n.op, 'anybinaryop'), self.parse(n.right, 'op'))
+anybinaryop = add | div | mult | sub
 add = node('Add') -> '+'
 div = node('Div') -> '/'
 mult = node('Mult') -> '*'
@@ -66,7 +66,10 @@ op = binop
 
 assignop = name | subscript(True)
 assign = node('Assign'):n ?(len(n.targets) == 1) -> '%s = %s' % (self.parse(n.targets[0], 'assignop'), self.parse(n.value, 'op'))
+augassign = node('AugAssign'):n -> '%s %s= %s' % (self.parse(n.target, 'assignop'), self.parse(n.op, 'anybinaryop'), self.parse(n.value, 'op'))
 expr = node('Expr'):n -> self.parse(n.value, 'op')
+return = node('Return'):n -> 'return %s' % self.parse(n.value, 'op') if n.value else 'return'
+pass = node('Pass') -> ''
 functiondef 0 = node('FunctionDef'):n -> self.gen_func(n, 0)
 
 if :i = node('If'):n -> 'if (%s) {\n%s%s}%s' % (self.parse(n.test, 'op'), self.parse(n.body, 'body', i+1), indent(i), self.parse(n, 'else', i))
@@ -77,7 +80,7 @@ range = node('Call'):n ?(self.parse(n.func, 'name') == 'range') ?(not n.keywords
 
 while :i = node('While'):n -> self.gen_while(n, i)
 
-bodyitem :i = (assign | expr):n -> indent(i) + n + ';'
+bodyitem :i = (assign | augassign | expr | return | pass):n -> indent(i) + n + ';'
             | (if(i) | for(i) | while(i)):n -> indent(i) + n
             | functiondef(i)
 body :i = bodyitem(i)+:xs -> '\n'.join(xs) + '\n'
@@ -132,7 +135,7 @@ while (%(test)s) {
 '''.strip()
 
 _func_prototype = r'''
-%(func_type)s void %(name)s(%(args)s)
+%(func_type)s %(return_type)s %(name)s(%(args)s)
 '''.strip()
 
 _func_template = r'''
@@ -146,28 +149,26 @@ _shift_arg = r'''
 '''.lstrip();
 
 _offset_template = r'''
-numblocks = (%(dims)s) / (%(size)s);
-blockpos = rest / numblocks;
-%(name)s.offset[%(dim)d] = blockpos * %(dimlength)d;
-rest -= blockpos * numblocks;
+__numblocks = (%(dims)s) / (%(size)s);
+__blockpos = __rest / __numblocks;
+%(name)s.offset[%(dim)d] = __blockpos * %(dimlength)d;
+__rest -= __blockpos * __numblocks;
 '''.strip();
 
 _kernel_body = r'''
-unsigned int thread_id = threadIdx.x;
-unsigned int total_threads = gridDim.x*blockDim.x;
-unsigned int start_block = blockDim.x*blockIdx.x;
-unsigned int block, blocks_per_thread, end, rest, blockpos, numblocks;
+unsigned int __total_threads = CPU_COUNT * THREAD_COUNT;
+unsigned int __block, __blocks_per_thread, __end, __rest, __blockpos, __numblocks;
 
 %(declarations)s
 
-blocks_per_thread = (count + total_threads - 1) / total_threads;
-block = start_block + thread_id;
-end = block + blocks_per_thread;
+__blocks_per_thread = (__count + __total_threads - 1) / __total_threads;
+__block = (CPU_INDEX * THREAD_COUNT + THREAD_INDEX) * __blocks_per_thread;
+__end = __block + __blocks_per_thread;
 
-if (end > count)
-    end = count;
+if (__end > __count)
+    __end = __count;
 
-for (; block < end; block++) {
+for (; __block < __end; __block++) {
     %(offset)s
     %(call)s
 }
@@ -187,9 +188,10 @@ def make_prototype(func, func_type, name, info):
             'args': ', '.join(['%s %s' % (types[arg][1], arg) for arg in args]),
             'name': name,
             'func_type': func_type,
+            'return_type': types.get('return', (0, 'void'))[1],
         }
         if func_type == '__global__':
-             data['args'] += ', int count'
+             data['args'] += ', int __count'
         prototype = _func_prototype % data
         info['prototypes'][func_type] = prototype
         return prototype
@@ -209,7 +211,7 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         return getattr(self, '_func_name', None)
 
     def parse(self, data, rule='grammar', *args):
-        print data, rule
+        # print data, rule
         if not isinstance(data, (tuple, list)):
             data = (data,)
         try:
@@ -265,7 +267,8 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         types = info['types']
         args = set(arg.id for arg in func.args.args)
         vars = set(types.keys()).symmetric_difference(args)
-        vars = '\n'.join('%s %s;' % (types[var][1], var) for var in vars)
+        vars = '\n'.join('%s %s;' % (types[var][1], var) for var in vars
+                         if var != 'return')
         if vars:
             vars += '\n\n'
         data = {
@@ -273,6 +276,11 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
             'body': indent_source(level+1, vars) + self.parse(func.body, 'body', level+1),
         }
         source = _func_template % data
+
+        # Functions with return values can't be called from the CPU
+        if types.get('return'):
+            self._func_name = None
+            return source
 
         # Generate kernel that shifts block by offset and calls device function
         args = []
@@ -286,22 +294,23 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
             shape = blockshapes.get(arg)
             if shape:
                 blockinit.append(_shift_arg % {'name': arg, 'type': types[arg][1]})
+                origarg = arg
                 arg = '__shifted_' + arg
-                offsetinit.append('rest = block;')
+                offsetinit.append('__rest = __block;')
                 for dim, dimlength in enumerate(shape):
-                    if overlapping:
+                    if origarg in overlapping:
                         dimlength = 1
                     if dim == len(shape) - 1:
-                        offsetinit.append('%s.offset[%d] = rest * %d;\n' % (
+                        offsetinit.append('%s.offset[%d] = __rest * %d;\n' % (
                             arg, dim, dimlength))
                         break
-                    if overlapping and not center_as_origin:
-                        dims = ' * '.join('(%s.dim[%d] - %d)' % (arg, subdim, shape[subdim] - 1)
+                    if origarg in overlapping and not center_as_origin:
+                        dims = ' * '.join('(%s.dim[%d] - (%s - 1))' % (arg, subdim, shape[subdim])
                                           for subdim in range(dim+1, len(shape)))
                     else:
                         dims = ' * '.join('%s.dim[%d]' % (arg, subdim)
                                           for subdim in range(dim+1, len(shape)))
-                    if overlapping:
+                    if origarg in overlapping:
                         size = '1'
                     else:
                         size = ' * '.join('%d' % shape[subdim]
@@ -330,8 +339,18 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         args = [self.parse(arg, 'op') for arg in call.args]
         if '->' in name:
             arg, name = name.split('->', 1)
+            info = _gpu_funcs[self.func_name]
+            shape = info['blockshapes'][arg]
+            if info['types'][arg][2].name == 'float32':
+                name = 'f' + name
+            name += '%dd' % len(shape)
             args.insert(0, arg)
+            args.extend(str(arg) for arg in shape)
             name = '__array_' + name
+        elif name in ('int', 'float'):
+            name = '__' + name
+        elif name in ('min', 'max'):
+            name = 'f' + name
         assert call.starargs is None
         assert call.kwargs is None
         assert call.keywords == []
