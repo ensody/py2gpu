@@ -39,13 +39,13 @@ def __array_fless2d(data, result, value, height, width):
 
 @blockwise({'data': ('height', 'width')},
            {('data', 'result'): FloatArray, 'values': IntArray, ('height', 'width'): int})
-def __array_fmapmul2d(data, result, values, height, width):
+def __array_fimul2d(data, result, values, height, width):
     for row in range(height):
         for col in range(width):
             result[row, col] = data[row, col] * values[row, col]
 
 @blockwise({'data': ('height', 'width')},
-           {'data': IntArray, ('height', 'width'): int, 'value': float32})
+           {'data': IntArray, ('height', 'width'): int})
 def __array_invert2d(data, height, width):
     for row in range(height):
         for col in range(width):
