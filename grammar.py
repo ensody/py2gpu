@@ -19,6 +19,7 @@ attribute = node('Attribute'):n -> '%s->%s' % (self.parse(n.value, 'name'), n.at
 name = node('Name'):n -> name_mapper.get(n.id, n.id)
 varaccess = attribute | name
 num = node('Num'):n -> str(n.n)
+anyvar = varaccess | num
 
 binop = node('BinOp'):n -> '(%s %s %s)' % (self.parse(n.left, 'op'), self.parse(n.op, 'anybinaryop'), self.parse(n.right, 'op'))
 anybinaryop = add | div | mult | sub
@@ -64,9 +65,11 @@ op = binop
    | call
    | compare
 
+
 assignop = name | subscript(True)
-assign = node('Assign'):n ?(len(n.targets) == 1) -> '%s = %s' % (self.parse(n.targets[0], 'assignop'), self.parse(n.value, 'op'))
+assign = node('Assign'):n -> '%s = %s' % (' = '.join([self.parse(target, 'assignop') for target in n.targets]), self.parse(n.value, 'oporassign'))
 augassign = node('AugAssign'):n -> '%s %s= %s' % (self.parse(n.target, 'assignop'), self.parse(n.op, 'anybinaryop'), self.parse(n.value, 'op'))
+oporassign = op | assign
 expr = node('Expr'):n -> self.parse(n.value, 'op')
 return = node('Return'):n -> 'return %s' % self.parse(n.value, 'op') if n.value else 'return'
 pass = node('Pass') -> ''
@@ -80,7 +83,10 @@ range = node('Call'):n ?(self.parse(n.func, 'name') == 'range') ?(not n.keywords
 
 while :i = node('While'):n -> self.gen_while(n, i)
 
-bodyitem :i = (assign | augassign | expr | return | pass):n -> indent(i) + n + ';'
+continue = node('Continue') -> 'continue'
+break = node('Break') -> 'break'
+
+bodyitem :i = (assign | augassign | expr | return | pass | continue | break):n -> indent(i) + n + ';'
             | (if(i) | for(i) | while(i)):n -> indent(i) + n
             | functiondef(i)
 body :i = bodyitem(i)+:xs -> '\n'.join(xs) + '\n'
@@ -155,18 +161,21 @@ __blockpos = __rest / __numblocks;
 __rest -= __blockpos * __numblocks;
 '''.strip();
 
+# TODO: Maximize processor usage instead of thread usage!
 _kernel_body = r'''
-unsigned int __total_threads = CPU_COUNT * THREAD_COUNT;
-unsigned int __block, __blocks_per_thread, __end, __rest, __blockpos, __numblocks;
+int __gpu_thread_index = CPU_INDEX * THREAD_COUNT + THREAD_INDEX;
+int __block, __blocks_per_thread, __end, __rest, __blockpos, __numblocks;
 
 %(declarations)s
 
 __blocks_per_thread = (__count + __total_threads - 1) / __total_threads;
-__block = (CPU_INDEX * THREAD_COUNT + THREAD_INDEX) * __blocks_per_thread;
+__block = __gpu_thread_index * __blocks_per_thread;
 __end = __block + __blocks_per_thread;
 
 if (__end > __count)
     __end = __count;
+
+%(threadmemory)s
 
 for (; __block < __end; __block++) {
     %(offset)s
@@ -191,7 +200,7 @@ def make_prototype(func, func_type, name, info):
             'return_type': types.get('return', (0, 'void'))[1],
         }
         if func_type == '__global__':
-             data['args'] += ', int __count'
+             data['args'] += ', int __count, int __total_threads'
         prototype = _func_prototype % data
         info['prototypes'][func_type] = prototype
         return prototype
@@ -211,7 +220,7 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         return getattr(self, '_func_name', None)
 
     def parse(self, data, rule='grammar', *args):
-        # print data, rule
+        # print data, rule, [(getattr(item, 'lineno', 0), getattr(item, 'col_offset', 0)) for item in (data if isinstance(data, (tuple, list)) else [data])]
         if not isinstance(data, (tuple, list)):
             data = (data,)
         try:
@@ -286,11 +295,27 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         args = []
         blockinit = []
         offsetinit = []
+        threadmeminit = []
         blockshapes = info['blockshapes']
         overlapping = info['overlapping']
+        threadmemory = info['threadmemory']
         center_as_origin = info['center_as_origin']
         for arg in func.args.args:
             arg = arg.id
+            shape = threadmemory.get(arg)
+            if shape:
+                blockinit.append(_shift_arg % {'name': arg, 'type': types[arg][1]})
+                origarg = arg
+                arg = '__shifted_' + arg
+                threadmeminit.append('%s.data += __gpu_thread_index * %s;' % (
+                                     arg, ' * '.join(str(dim) for dim in shape)))
+                threadmeminit.append(' = '.join('%s.offset[%d]' % (arg, dim)
+                                                for dim in range(len(shape)))
+                                     + ' = 0;')
+                threadmeminit.extend('%s.dim[%d] = %s;' % (arg, dim, dimlength)
+                                     for dim, dimlength in enumerate(shape))
+                arg = '&' + arg
+            
             shape = blockshapes.get(arg)
             if shape:
                 blockinit.append(_shift_arg % {'name': arg, 'type': types[arg][1]})
@@ -301,6 +326,10 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
                     if origarg in overlapping:
                         dimlength = 1
                     if dim == len(shape) - 1:
+                        # TODO: instead of having to add offset to calculate
+                        # block coordinates we could manipulate the data
+                        # pointer directly and only use the offset for
+                        # bounds checking (if needed, at all)
                         offsetinit.append('%s.offset[%d] = __rest * %d;\n' % (
                             arg, dim, dimlength))
                         break
@@ -323,6 +352,7 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         bodydata = {
             'declarations': '%s' % ''.join(blockinit),
             'offset': indent_source(level + 1, '\n'.join(offsetinit)).lstrip(),
+            'threadmemory': indent_source(level, '\n'.join(threadmeminit)).lstrip(),
             'call': '%s(%s);' % (func.name, ', '.join(args)),
         }
         data['func'] = make_prototype(func, '__global__', '_kernel_' + name, info)
@@ -340,7 +370,7 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         if '->' in name:
             arg, name = name.split('->', 1)
             info = _gpu_funcs[self.func_name]
-            shape = info['blockshapes'][arg]
+            shape = info['blockshapes'].get(arg) or info['threadmemory'].get(arg)
             if info['types'][arg][2].name == 'float32':
                 name = 'f' + name
             name += '%dd' % len(shape)

@@ -25,14 +25,22 @@ def _rename_func(tree, name):
     tree.body[0].name = name
     return tree
 
-def blockwise(blockshapes, types, overlapping=True, center_as_origin=False,
+def blockwise(blockshapes, types, threadmemory={}, overlapping=True, center_as_origin=False,
               out_of_bounds_value=_no_bounds_check, name=None, reduce=None):
+    """
+    Processes the image in parallel by splitting it into equally-sized blocks.
+
+    threadmemory can be used to store thread-local temporary data.
+    """
     blockshapes = _simplify(blockshapes)
     types = _simplify(types)
+    threadmemory = _simplify(threadmemory)
     if overlapping is True:
         overlapping = blockshapes.keys()
     elif isinstance(overlapping, basestring):
         overlapping = (overlapping,)
+    else:
+        overlapping = ()
     assert overlapping or not center_as_origin, \
         "You can't have overlapping=False and center_as_origin=True"
     for varname, vartype in types.items():
@@ -52,6 +60,7 @@ def blockwise(blockshapes, types, overlapping=True, center_as_origin=False,
             'center_as_origin': center_as_origin,
             'out_of_bounds_value': out_of_bounds_value,
             'source': source,
+            'threadmemory': threadmemory,
             'types': types,
             'tree': _rename_func(ast.parse(source), fname),
             'prototypes': {},
@@ -66,18 +75,16 @@ def blockwise(blockshapes, types, overlapping=True, center_as_origin=False,
     return _blockwise
 
 _typedef_base = r'''
-typedef struct __align__(64) {
+typedef struct /* __align__(64) */ {
     %(type)s *data;
     int dim[4];
     int offset[4];
-    int ndim;
-    int size;
 } %(Type)sArrayStruct;
 typedef %(Type)sArrayStruct* %(Type)sArray;
 '''.lstrip()
 
 _typedefs = r'''
-#define sync __synchronize
+#define sync __syncthreads
 #define CPU_INDEX blockIdx.x
 #define CPU_COUNT gridDim.x
 #define THREAD_INDEX threadIdx.x
@@ -131,6 +138,16 @@ def get_arg_type(arg):
         raise ValueError("Unknown type '%r'" % tp)
     return dtype.char, cname, dtype
 
+def get_shape_dim(dim, argnames, args):
+    if isinstance(dim, basestring):
+        return args[argnames.index(dim)]
+    return dim
+
+def get_shape(shape, argnames, args):
+    if not shape:
+        return shape
+    return tuple(get_shape_dim(dim, argnames, args) for dim in shape)
+
 def make_gpu_func(mod, name, info):
     if info['types'].get('return'):
         def _gpu_func(*args):
@@ -138,17 +155,18 @@ def make_gpu_func(mod, name, info):
         return _gpu_func
     func = mod.get_function('_kernel_' + name)
     blockshapes = info['blockshapes']
+    threadmemory = info['threadmemory']
     overlapping = info['overlapping']
     center_as_origin = info['center_as_origin']
     types = info['types']
     argnames = inspect.getargspec(info['func']).args
-    argtypes = ''.join(types[arg][0] for arg in argnames) + 'i'
+    argtypes = ''.join(types[arg][0] for arg in argnames) + 'ii'
     func.prepare(argtypes, (1, 1, 1))
     def _gpu_func(*args):
         kernel_args = []
         arrays = []
         grid = (1, 1, 1)
-        count, block = 0, 0
+        count = threadcount = block = 0
         for argname, arg in zip(argnames, args):
             if isinstance(arg, numpy.ndarray):
                 arg = GPUArray(arg, dtype=types[argname][2])
@@ -157,7 +175,13 @@ def make_gpu_func(mod, name, info):
                 assert arg.dtype == types[argname][2], \
                     "The data type (%s) of the argument %s doesn't match " \
                     'the function definition (%s)' % (arg.dtype, argname, types[argname][2])
-                shape = blockshapes.get(argname)
+                shape = get_shape(threadmemory.get(argname), argnames, args)
+                if shape:
+                    old_threadcount = threadcount
+                    threadcount = arg.data.size / numpy.array(shape).prod()
+                    if old_threadcount:
+                        threadcount = min(old_threadcount, threadcount)
+                shape = get_shape(blockshapes.get(argname), argnames, args)
                 if shape:
                     if argname in overlapping and shape != (1,) * len(shape):
                         # TODO: read pixels into shared memory by running
@@ -190,8 +214,13 @@ def make_gpu_func(mod, name, info):
                 arg = arg.pointer
             kernel_args.append(arg)
         # Determine number of blocks
-        kernel_args.append(count)
-        grid, block = splay(count)
+        if not threadcount:
+            threadcount = count
+        threadcount = int(threadcount)
+        grid, block = splay(threadcount)
+        print name, threadcount, grid[0] * block[0], grid[0], 'x', block[0]
+        threadcount = min(grid[0] * block[0], threadcount)
+        kernel_args.extend((count, threadcount))
         func.set_block_shape(*block)
         func.prepared_call(grid, *kernel_args)
         # Now copy temporary arrays back
@@ -224,7 +253,7 @@ def emulate_gpu_code():
         info['gpufunc'] = make_emulator_func(info['func'])
 
 class GPUArray(object):
-    size = intpsize + (4 + 4 + 1 + 1) * int32size
+    size = intpsize + (4 + 4) * int32size
     def __init__(self, data, dtype=None, copy_to_device=True):
         self.data = data
         if dtype:
@@ -246,8 +275,8 @@ class GPUArray(object):
         # dim
         struct = data.shape
         struct += (4 - data.ndim) * (0,)
-        # offset, ndim, size
-        struct += 4 * (0,) + (data.ndim, data.size)
+        # offset
+        struct += 4 * (0,)
         struct = numpy.array(struct, dtype=numpy.int32)
         driver.memcpy_htod(int(self.pointer) + intpsize, buffer(struct))
 
