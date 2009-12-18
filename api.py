@@ -2,10 +2,16 @@ import ast
 from functools import wraps
 import inspect
 import numpy
-import pycuda.autoinit
-from pycuda import driver
-from pycuda.compiler import SourceModule
-from pycuda.gpuarray import splay
+try:
+    import pycuda.autoinit
+    from pycuda import driver
+    from pycuda.compiler import SourceModule
+    from pycuda.gpuarray import splay
+except ImportError:
+    import sys
+    print >>sys.stderr, 'pycuda not found. Only emulation will work.'
+    def splay(*args):
+        return (512, 1), (32, 1, 1)
 from py2gpu.grammar import _gpu_funcs, convert, make_prototype, _no_bounds_check
 from textwrap import dedent
 
@@ -66,9 +72,13 @@ def blockwise(blockshapes, types, threadmemory={}, overlapping=True, center_as_o
             'prototypes': {},
         })
         def _call_blockwise(*args):
+            global _emulating_call
             assert 'gpufunc' in info, \
                 'You have to call compile_gpu_code() before executing a GPU function.'
-            gpufunc = info['gpufunc']
+            if _emulating_call:
+                gpufunc = info['func']
+            else:
+                gpufunc = info['gpufunc']
             return gpufunc(*args)
         _call_blockwise._py2gpu_original = func
         return wraps(func)(_call_blockwise)
@@ -148,12 +158,11 @@ def get_shape(shape, argnames, args):
         return shape
     return tuple(get_shape_dim(dim, argnames, args) for dim in shape)
 
-def make_gpu_func(mod, name, info):
+def make_gpu_func(func, name, info):
     if info['types'].get('return'):
         def _gpu_func(*args):
             raise ValueError("Functions with a return value can't be called from the CPU.")
         return _gpu_func
-    func = mod.get_function('_kernel_' + name)
     blockshapes = info['blockshapes']
     threadmemory = info['threadmemory']
     overlapping = info['overlapping']
@@ -229,14 +238,129 @@ def make_gpu_func(mod, name, info):
             gpuarray.copy_from_device()
     return _gpu_func
 
-def make_emulator_func(func):
-    def emulator(*args):
-        assert len(kwargs.keys()) == 1, 'Only "block" keyword argument is supported!'
-        # TODO:
-        raise NotImplementedError('Function emulation is not supported, yet')
-    return emulator
+_emulating_call = False
+def make_emulator_func(func, name, info):
+    blockshapes = info['blockshapes']
+    threadmemory = info['threadmemory']
+    overlapping = info['overlapping']
+    center_as_origin = info['center_as_origin']
+    out_of_bounds_value = info['out_of_bounds_value']
+    types = info['types']
+    argnames = inspect.getargspec(info['func']).args
+    def _emulator_func(*args):
+        global _emulating_call
+        is_first_call = not _emulating_call
+        _emulating_call = True
+        blockcount, threadcount = args[-2:]
+        args = args[:-2]
+        blocks_per_thread = (blockcount + threadcount - 1) / threadcount
+        # Start with last thread, so we're more likely to hit a bug
+        for thread in reversed(range(threadcount)):
+            start = thread * blocks_per_thread
+            end = min(start + blocks_per_thread, blockcount)
+            if start >= end:
+                continue
+            # print thread
+            for block in range(start, end):
+                print thread, block, threadcount, blockcount
+                kernel_args = []
+                for argname, arg in zip(argnames, args):
+                    if isinstance(arg, GPUArray):
+                        arg = arg.data
+                        shape = get_shape(threadmemory.get(argname), argnames, args)
+                        if shape:
+                            # Emulate thread memory
+                            size = numpy.array(shape).prod()
+                            pool = arg.reshape(arg.size)
+                            memory = pool[size*thread:size*(thread+1)]
+                            arg = EmulatedArray(memory.reshape(shape), shape)
+                        shape = get_shape(blockshapes.get(argname), argnames, args)
+                        if shape:
+                            blockshape = shape
+                            shape = numpy.array(shape)
+                            if center_as_origin:
+                                shape[...] = 1
+                            numblocks = (numpy.array(arg.shape) - (shape - 1))
+                            if argname in overlapping:
+                                shape[...] = 1
+                            numblocks /= shape
+                            offset = shape.copy() * 0
+                            rest = block
+                            for dim in range(len(shape[:-1])):
+                                offset[dim], rest = divmod(rest, numblocks[dim+1:].prod())
+                                offset[dim] *= shape[dim]
+                            offset[-1] = rest * shape[-1]
+                            print argname, offset, numblocks, blockshape, arg.shape
+                            arg = EmulatedArray(arg, blockshape, offset=offset,
+                                out_of_bounds_value=out_of_bounds_value)
+
+                        if not isinstance(arg, EmulatedArray):
+                            arg = EmulatedArray(arg, None)
+                    kernel_args.append(arg)
+                func(*kernel_args)
+        if is_first_call:
+            _emulating_call = False
+
+    def do_nothing(*args):
+        pass
+    _emulator_func.prepare = do_nothing
+    _emulator_func.set_block_shape = do_nothing
+    def prepared_call(grid, *args):
+        _emulator_func(*args)
+    _emulator_func.prepared_call = prepared_call
+
+    return _emulator_func
+
+class EmulatedArray(object):
+    def __init__(self, data, blockshape, offset=None, out_of_bounds_value=None):
+        self.data = data
+        self.blockshape = blockshape
+        self.dim = data.shape
+        if offset is None:
+            offset = 4 * (0,)
+        self.offset = offset
+        self.out_of_bounds_value = out_of_bounds_value
+
+    def _convert_index(self, index):
+        if not isinstance(index, (tuple, list)):
+            index = (index,)
+        index = numpy.array(index)
+        index += numpy.array(self.offset[:index.size])
+        if self.out_of_bounds_value is not _no_bounds_check:
+            if (index < 0).any() or (index >= numpy.array(self.dim[:index.size])).any():
+                return None
+        if index.size > 1:
+            index = tuple(index)
+        else:
+            index = index[0]
+        return index
+
+    def __getitem__(self, index):
+        index = self._convert_index(index)
+        if index is None:
+            return self.out_of_bounds_value
+        return self.data[index]
+
+    def __setitem__(self, index, value):
+        index = self._convert_index(index)
+        if index is None:
+            return
+        self.data[index] = value
+
+    def __getattr__(self, name):
+        kind = ''
+        if self.data.dtype == numpy.dtype(numpy.float32):
+            kind = 'f'
+        dim = '%dd' % len(self.data.shape)
+        name = '__array_' + kind + name + dim
+        func = _gpu_funcs[name]['func']
+        def arrayfunc(*args):
+            args += tuple(self.blockshape)
+            return func(self, *args)
+        return arrayfunc
 
 def compile_gpu_code():
+    GPUArray.emulate = False
     source = ['\n\n']
     for name, info in _gpu_funcs.items():
         source.append(convert(info['tree'], info['source']))
@@ -246,14 +370,19 @@ def compile_gpu_code():
     print '\n' + source
     mod = SourceModule(source)
     for name, info in _gpu_funcs.items():
-        info['gpufunc'] = make_gpu_func(mod, name, info)
+        func = mod.get_function('_kernel_' + name)
+        info['gpufunc'] = make_gpu_func(func, name, info)
 
 def emulate_gpu_code():
-    for info in _gpu_funcs.values():
-        info['gpufunc'] = make_emulator_func(info['func'])
+    GPUArray.emulate = True
+    for name, info in _gpu_funcs.items():
+        func = make_emulator_func(info['func'], name, info)
+        info['gpufunc'] = make_gpu_func(func, name, info)
 
 class GPUArray(object):
     size = intpsize + (4 + 4) * int32size
+    emulate = False
+
     def __init__(self, data, dtype=None, copy_to_device=True):
         self.data = data
         if dtype:
@@ -261,6 +390,10 @@ class GPUArray(object):
         else:
             dtype = data.dtype
         self.dtype = dtype
+
+        if self.emulate:
+            self.pointer = self
+            return
 
         # Copy array to device
         self.pointer = driver.mem_alloc(self.size)
@@ -281,6 +414,8 @@ class GPUArray(object):
         driver.memcpy_htod(int(self.pointer) + intpsize, buffer(struct))
 
     def copy_from_device(self):
+        if self.emulate:
+            return
         self.data[...] = driver.from_device_like(self.device_data, self.data)
 
 from py2gpu import arrayfuncs

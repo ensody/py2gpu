@@ -86,9 +86,12 @@ while :i = node('While'):n -> self.gen_while(n, i)
 continue = node('Continue') -> 'continue'
 break = node('Break') -> 'break'
 
+print = node('Print') -> ''
+
 bodyitem :i = (assign | augassign | expr | return | pass | continue | break):n -> indent(i) + n + ';'
             | (if(i) | for(i) | while(i)):n -> indent(i) + n
             | functiondef(i)
+            | print
 body :i = bodyitem(i)+:xs -> '\n'.join(xs) + '\n'
 
 grammar = node('Module'):n -> self.parse(n.body, 'body', 0)
