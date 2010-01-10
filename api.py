@@ -372,6 +372,7 @@ def compile_gpu_code():
     for name, info in _gpu_funcs.items():
         func = mod.get_function('_kernel_' + name)
         info['gpufunc'] = make_gpu_func(func, name, info)
+        info['gpumodule'] = mod
 
 def emulate_gpu_code():
     GPUArray.emulate = True
@@ -402,7 +403,7 @@ class GPUArray(object):
         if copy_to_device:
             self.device_data = driver.to_device(data)
         else:
-            self.device_data = driver.mem_alloc(data.nbytes)
+            self.device_data = driver.mem_alloc_like(data)
         driver.memcpy_htod(int(self.pointer), numpy.intp(int(self.device_data)))
 
         # dim
