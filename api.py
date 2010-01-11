@@ -359,7 +359,11 @@ class EmulatedArray(object):
             return func(self, *args)
         return arrayfunc
 
-def compile_gpu_code():
+def compile_gpu_code(emulate=False):
+    if emulate:
+        global driver, SourceModule
+        from py2gpu import c_driver as driver
+        SourceModule = driver.SourceModule
     GPUArray.emulate = False
     source = ['\n\n']
     for name, info in _gpu_funcs.items():
@@ -370,6 +374,8 @@ def compile_gpu_code():
     print '\n' + source
     mod = SourceModule(source)
     for name, info in _gpu_funcs.items():
+        if 'return' in info['types']:
+            continue
         func = mod.get_function('_kernel_' + name)
         info['gpufunc'] = make_gpu_func(func, name, info)
         info['gpumodule'] = mod

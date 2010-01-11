@@ -275,6 +275,7 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
 
         # Store function name, so it can be reused in other parser rules
         self._func_name = name
+        info['funcnode'] = func
 
         types = info['types']
         args = set(arg.id for arg in func.args.args)
