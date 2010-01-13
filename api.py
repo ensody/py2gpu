@@ -87,13 +87,14 @@ def blockwise(blockshapes, types, threadmemory={}, overlapping=True, center_as_o
 _typedef_base = r'''
 typedef struct /* __align__(64) */ {
     %(type)s *data;
-    int dim[4];
-    int offset[4];
+    int dim[NDIMS];
+    int offset[NDIMS];
 } %(Type)sArrayStruct;
 typedef %(Type)sArrayStruct* %(Type)sArray;
 '''.lstrip()
 
 _typedefs = r'''
+#define NDIMS 4
 #define sync __syncthreads
 #define CPU_INDEX blockIdx.x
 #define CPU_COUNT gridDim.x
@@ -122,7 +123,7 @@ class FloatArray(ArrayType):
 
 def get_arg_type(arg):
     if issubclass(arg, ArrayType):
-        return "P", arg.__name__, numpy.dtype(arg.dtype)
+        return "PP", arg.__name__, numpy.dtype(arg.dtype), get_arg_type(arg.dtype)[1]
     dtype = numpy.dtype(arg)
     if issubclass(arg, numpy.int8):
         cname = 'char'
@@ -146,7 +147,7 @@ def get_arg_type(arg):
         cname = 'double'
     else:
         raise ValueError("Unknown type '%r'" % tp)
-    return dtype.char, cname, dtype
+    return dtype.char, cname, dtype, cname
 
 def get_shape_dim(dim, argnames, args):
     if isinstance(dim, basestring):
@@ -220,8 +221,10 @@ def make_gpu_func(func, name, info):
                             "doesn't match the preceding blockwise " \
                             'arguments (%d).' % (argname, blockcount, count)
                     count = int(blockcount)
-                arg = arg.pointer
+                kernel_args.extend((arg.pointer, arg.shape))
+                continue
             kernel_args.append(arg)
+
         # Determine number of blocks
         if not threadcount:
             threadcount = count
@@ -364,19 +367,18 @@ def compile_gpu_code(emulate=False):
         global driver, SourceModule
         from py2gpu import c_driver as driver
         SourceModule = driver.SourceModule
-    GPUArray.emulate = False
+    GPUArray.emulate = emulate
     source = ['\n\n']
     for name, info in _gpu_funcs.items():
         source.append(convert(info['tree'], info['source']))
         source.insert(0, ';\n'.join(info['prototypes'].values()) + ';\n')
     source.insert(0, _typedefs)
     source = ''.join(source)
-    print '\n' + source
     mod = SourceModule(source)
     for name, info in _gpu_funcs.items():
         if 'return' in info['types']:
             continue
-        func = mod.get_function('_kernel_' + name)
+        func = mod.get_function('__kernel_' + name)
         info['gpufunc'] = make_gpu_func(func, name, info)
         info['gpumodule'] = mod
 
@@ -387,7 +389,6 @@ def emulate_gpu_code():
         info['gpufunc'] = make_gpu_func(func, name, info)
 
 class GPUArray(object):
-    size = intpsize + (4 + 4) * int32size
     emulate = False
 
     def __init__(self, data, dtype=None, copy_to_device=True):
@@ -398,32 +399,23 @@ class GPUArray(object):
             dtype = data.dtype
         self.dtype = dtype
 
+        shape = numpy.array(data.shape, dtype=numpy.int32)
         if self.emulate:
             self.pointer = self
+            self.shape = shape
             return
-
-        # Copy array to device
-        self.pointer = driver.mem_alloc(self.size)
 
         # data
         if copy_to_device:
-            self.device_data = driver.to_device(data)
+            self.pointer = driver.to_device(data)
         else:
-            self.device_data = driver.mem_alloc_like(data)
-        driver.memcpy_htod(int(self.pointer), numpy.intp(int(self.device_data)))
-
-        # dim
-        struct = data.shape
-        struct += (4 - data.ndim) * (0,)
-        # offset
-        struct += 4 * (0,)
-        struct = numpy.array(struct, dtype=numpy.int32)
-        driver.memcpy_htod(int(self.pointer) + intpsize, buffer(struct))
+            self.pointer = driver.mem_alloc_like(data)
+        self.shape = driver.to_device(shape)
 
     def copy_from_device(self):
         if self.emulate:
             return
-        self.data[...] = driver.from_device_like(self.device_data, self.data)
+        self.data[...] = driver.from_device_like(self.pointer, self.data)
 
 from py2gpu import arrayfuncs
 def make_array_reduction(name):
