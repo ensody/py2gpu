@@ -153,9 +153,14 @@ _func_template = r'''
 }
 '''.lstrip()
 
-_shift_arg = r'''
-%(type)sStruct __shifted_%(name)s = *%(name)s;
-'''.lstrip();
+_array_def = r'''
+%(type)sStruct __array_%(name)s;
+__array_%(name)s.data = %(name)s;
+for (int i=0; i < NDIMS; i++) {
+    __array_%(name)s.dim[i] = __dim_%(name)s[i];
+    __array_%(name)s.offset[i] = 0;
+}
+'''.lstrip()
 
 _offset_template = r'''
 __numblocks = (%(dims)s) / (%(size)s);
@@ -196,8 +201,17 @@ def make_prototype(func, func_type, name, info):
         assert func.args.vararg is None
         assert func.args.kwarg is None
         assert func.args.defaults == []
+        funcargs = []
+        for arg in args:
+            kind = types[arg][1]
+            if func_type == '__global__' and kind.endswith('Array'):
+                funcargs.append('%s *%s' % (types[arg][3], arg))
+                funcargs.append('int *__dim_%s' % arg)
+            else:
+                funcargs.append('%s %s' % (kind, arg))
+
         data = {
-            'args': ', '.join(['%s %s' % (types[arg][1], arg) for arg in args]),
+            'args': ', '.join(funcargs),
             'name': name,
             'func_type': func_type,
             'return_type': types.get('return', (0, 'void'))[1],
@@ -296,7 +310,6 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
             return source
 
         # Generate kernel that shifts block by offset and calls device function
-        args = []
         blockinit = []
         offsetinit = []
         threadmeminit = []
@@ -304,13 +317,17 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         overlapping = info['overlapping']
         threadmemory = info['threadmemory']
         center_as_origin = info['center_as_origin']
+        args = []
         for arg in func.args.args:
-            arg = arg.id
-            shape = threadmemory.get(arg)
-            if shape:
-                blockinit.append(_shift_arg % {'name': arg, 'type': types[arg][1]})
+            origarg = arg = arg.id
+            kind = types[arg][1]
+            if kind.endswith('Array'):
+                blockinit.append(_array_def % {'name': arg, 'type': kind})
                 origarg = arg
-                arg = '__shifted_' + arg
+                arg = '__array_' + arg
+
+            shape = threadmemory.get(origarg)
+            if shape:
                 threadmeminit.append('%s.data += __gpu_thread_index * %s;' % (
                                      arg, ' * '.join(str(dim) for dim in shape)))
                 threadmeminit.append(' = '.join('%s.offset[%d]' % (arg, dim)
@@ -318,13 +335,9 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
                                      + ' = 0;')
                 threadmeminit.extend('%s.dim[%d] = %s;' % (arg, dim, dimlength)
                                      for dim, dimlength in enumerate(shape))
-                arg = '&' + arg
-            
-            shape = blockshapes.get(arg)
+
+            shape = blockshapes.get(origarg)
             if shape:
-                blockinit.append(_shift_arg % {'name': arg, 'type': types[arg][1]})
-                origarg = arg
-                arg = '__shifted_' + arg
                 offsetinit.append('__rest = __block;')
                 for dim, dimlength in enumerate(shape):
                     if origarg in overlapping:
@@ -351,7 +364,10 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
                     offsetinit.append(_offset_template % {'name': arg, 'dim': dim,
                                                           'dims': dims, 'size': size,
                                                           'dimlength': dimlength})
-                arg = '&' + arg
+
+            if kind.endswith('Array'):
+                args.append('&' + arg)
+                continue
             args.append(arg)
         bodydata = {
             'declarations': '%s' % ''.join(blockinit),
@@ -359,7 +375,7 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
             'threadmemory': indent_source(level, '\n'.join(threadmeminit)).lstrip(),
             'call': '%s(%s);' % (func.name, ', '.join(args)),
         }
-        data['func'] = make_prototype(func, '__global__', '_kernel_' + name, info)
+        data['func'] = make_prototype(func, '__global__', '__kernel_' + name, info)
         data['body'] = indent_source(level+1, _kernel_body % bodydata)
         source += _func_template % data
 
