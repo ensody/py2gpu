@@ -49,66 +49,6 @@ def if_center_reducer(x, y):
         right = y[0, 1]
     x[0, 0] = top + right + bottom + left
 
-def count_labels(img):
-    labelmap = zeros((img.shape[0] * img.shape[1],), dtype=int)
-    orig = img.copy()
-    height, width = img.shape
-    id = 0
-    next = 0
-    top = 0
-    for row in range(height):
-        left = 0
-        for col in range(width):
-            bottom = img[row, col]
-            if row > 0:
-                top = labelmap[img[row-1, col]]
-
-            if not bottom:
-                left = 0
-                continue
-
-            if top:
-                if left:
-                    if left > top:
-                        # Merge from top
-                        print col, 'mergetop |',
-                        labelmap[(labelmap == left).nonzero()] = top
-                        id = top
-                    elif left < top:
-                        # Merge from left
-                        print col, 'mergelefttop |',
-                        labelmap[(labelmap == top).nonzero()] = left
-                else:
-                    # Merge from top
-                    id = top
-            elif not left:
-                print col, '++ |',
-                next += 1
-                labelmap[next] = id = next
-
-            img[row, col] = id
-            left = id
-
-        c = 0
-        for i in range(1, next + 1):
-            if labelmap[i] >= i:
-                c += 1
-        print c
-
-        l = label(orig[:row+1])
-        if c != l[1]:
-            a = array(range(10) + range(10) + range(10) + range(10))[:img.shape[1]]
-            print '!!!', c, 'vs', l[1]
-            print vstack([a, img[:row+1]])
-            print vstack([a, l[0]])
-            print 'lm'
-            for i in range(len(labelmap)):
-                if labelmap[i]:
-                    print '%d: %d' % (i, labelmap[i])
-            print '!!!\n'
-            return img, next
-    return img, c
-
 compile_gpu_code()
 
 class GPUTest(TestCase):
@@ -177,13 +117,3 @@ class GPUTest(TestCase):
                         [8,  7, 13, 10, 12],
                         [4, 15,  6, 14,  6]], dtype=float32)
         self.assertEqualArrays(x, result)
-
-    def test_labels(self):
-        for i in range(1):
-            print 'round', i
-            r = (rand(25, 24) * 2).round().astype(bool).astype(int)
-            l = label(r)
-            cl = count_labels(r)
-            print cl[0]
-            print l[0]
-            self.assertEquals(l[1], cl[1])
