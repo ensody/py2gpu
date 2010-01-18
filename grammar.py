@@ -19,7 +19,8 @@ attribute = node('Attribute'):n -> '%s->%s' % (self.parse(n.value, 'name'), n.at
 name = node('Name'):n -> name_mapper.get(n.id, n.id)
 varaccess = attribute | name
 num = node('Num'):n -> str(n.n)
-anyvar = varaccess | num
+str = node('Str'):n -> to_string(n.s)
+anyvar = varaccess | num | str
 
 binop = node('BinOp'):n -> '(%s %s %s)' % (self.parse(n.left, 'op'), self.parse(n.op, 'anybinaryop'), self.parse(n.right, 'op'))
 anybinaryop = add | div | mult | sub
@@ -60,8 +61,7 @@ op = binop
    | unaryop
    | boolop
    | subscript(False)
-   | varaccess
-   | num
+   | anyvar
    | call
    | compare
 
@@ -118,6 +118,12 @@ def indent_source(level, source=''):
     shift = level * '    '
     return '\n'.join([line and shift + line for line in source.split('\n')])
 
+def to_string(string):
+    string = repr(string)
+    if string[0] == "'":
+        string = '"' + string[1:-1].replace('"', r'\"') + '"'
+    return string
+
 def p(*x):
     print x
 
@@ -131,6 +137,7 @@ vars = {
     'indent': indent,
     'p': p,
     'name_mapper': name_mapper,
+    'to_string': to_string,
 }
 
 _for_loop = r'''
@@ -157,7 +164,7 @@ _array_def = r'''
 %(type)sStruct __array_%(name)s;
 __array_%(name)s.data = %(name)s;
 for (int i=0; i < NDIMS; i++) {
-    __array_%(name)s.dim[i] = __dim_%(name)s[i];
+    __array_%(name)s.shape[i] = __dim_%(name)s[i];
     __array_%(name)s.offset[i] = 0;
 }
 '''.lstrip()
@@ -171,7 +178,7 @@ __rest -= __blockpos * __numblocks;
 
 # TODO: Maximize processor usage instead of thread usage!
 _kernel_body = r'''
-int __gpu_thread_index = CPU_INDEX * THREAD_COUNT + THREAD_INDEX;
+int __gpu_thread_index = INSTANCE;
 int __block, __blocks_per_thread, __end, __rest, __blockpos, __numblocks;
 
 %(declarations)s
@@ -264,7 +271,7 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         for dim, index in enumerate(indices):
             index = '(%s->offset[%d] + %s)' % (name, dim, index)
             shifted_indices.append(index)
-            access.append(' * '.join(['%s->dim[%d]' % (name, subdim)
+            access.append(' * '.join(['%s->shape[%d]' % (name, subdim)
                                       for subdim in range(dim+1, dims)] + [index]))
         subscript = '%s->data[%s]' % (name, ' + '.join(access))
 
@@ -275,7 +282,7 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
             blockshape = info['blockshapes'].get(name)
             if blockshape is not None and blockshape != (1,) * len(blockshape):
                 bounds_check = ' && '.join('%s %s' % (index, check)
-                                           for check in ('>= 0', '< %s->dim[%d]' % (name, dim))
+                                           for check in ('>= 0', '< %s->shape[%d]' % (name, dim))
                                            for dim, index in enumerate(shifted_indices))
                 if assigning:
                     subscript = 'if (%s) %s' % (bounds_check, subscript)
@@ -333,7 +340,7 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
                 threadmeminit.append(' = '.join('%s.offset[%d]' % (arg, dim)
                                                 for dim in range(len(shape)))
                                      + ' = 0;')
-                threadmeminit.extend('%s.dim[%d] = %s;' % (arg, dim, dimlength)
+                threadmeminit.extend('%s.shape[%d] = %s;' % (arg, dim, dimlength)
                                      for dim, dimlength in enumerate(shape))
 
             shape = blockshapes.get(origarg)
@@ -351,10 +358,10 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
                             arg, dim, dimlength))
                         break
                     if origarg in overlapping and not center_as_origin:
-                        dims = ' * '.join('(%s.dim[%d] - (%s - 1))' % (arg, subdim, shape[subdim])
+                        dims = ' * '.join('(%s.shape[%d] - (%s - 1))' % (arg, subdim, shape[subdim])
                                           for subdim in range(dim+1, len(shape)))
                     else:
-                        dims = ' * '.join('%s.dim[%d]' % (arg, subdim)
+                        dims = ' * '.join('%s.shape[%d]' % (arg, subdim)
                                           for subdim in range(dim+1, len(shape)))
                     if origarg in overlapping:
                         size = '1'

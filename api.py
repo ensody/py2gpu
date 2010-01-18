@@ -87,7 +87,7 @@ def blockwise(blockshapes, types, threadmemory={}, overlapping=True, center_as_o
 _typedef_base = r'''
 typedef struct /* __align__(64) */ {
     %(type)s *data;
-    int dim[NDIMS];
+    int shape[NDIMS];
     int offset[NDIMS];
 } %(Type)sArrayStruct;
 typedef %(Type)sArrayStruct* %(Type)sArray;
@@ -100,6 +100,7 @@ _typedefs = r'''
 #define CPU_COUNT gridDim.x
 #define THREAD_INDEX threadIdx.x
 #define THREAD_COUNT blockDim.x
+#define INSTANCE CPU_INDEX * THREAD_COUNT + THREAD_INDEX
 #define __int(x) ((int)(x))
 #define __float(x) ((float)(x))
 #define imax(a, b) max(a, b)
@@ -318,7 +319,7 @@ class EmulatedArray(object):
     def __init__(self, data, blockshape, offset=None, out_of_bounds_value=None):
         self.data = data
         self.blockshape = blockshape
-        self.dim = data.shape
+        self.shape = data.shape
         if offset is None:
             offset = 4 * (0,)
         self.offset = offset
@@ -330,7 +331,7 @@ class EmulatedArray(object):
         index = numpy.array(index)
         index += numpy.array(self.offset[:index.size])
         if self.out_of_bounds_value is not _no_bounds_check:
-            if (index < 0).any() or (index >= numpy.array(self.dim[:index.size])).any():
+            if (index < 0).any() or (index >= numpy.array(self.shape[:index.size])).any():
                 return None
         if index.size > 1:
             index = tuple(index)
@@ -399,10 +400,10 @@ class GPUArray(object):
             dtype = data.dtype
         self.dtype = dtype
 
-        shape = numpy.array(data.shape, dtype=numpy.int32)
+        self.shape = data.shape
+
         if self.emulate:
             self.pointer = self
-            self.shape = shape
             return
 
         # data
@@ -410,12 +411,38 @@ class GPUArray(object):
             self.pointer = driver.to_device(data)
         else:
             self.pointer = driver.mem_alloc_like(data)
-        self.shape = driver.to_device(shape)
 
     def copy_from_device(self):
         if self.emulate:
             return
         self.data[...] = driver.from_device_like(self.pointer, self.data)
+
+    def set_shape(self, shape):
+        shape = tuple(shape)
+        shape += (0,) * (4 - len(shape))
+        shape = numpy.array(shape, dtype=numpy.int32)
+
+        if not hasattr(self, '_shape'):
+            if self.emulate:
+                self._shape = numpy.array(shape, dtype=numpy.int32)
+            else:
+                self._shape = driver.to_device(shape)
+            return
+
+        if self.emulate:
+            self._shape[:] = shape
+        else:
+            memcpy_htod(self._shape, buffer(shape))
+    def get_shape(self):
+        return self._shape
+    shape = property(get_shape, set_shape)
+
+    def shrink_from_original_shape(self, shrink):
+        shape = numpy.array(self.data.shape, dtype=numpy.int32)
+        shrink = numpy.array(shrink, dtype=numpy.int32)
+        assert (shrink >= 0).all()
+        shape[:len(shrink)] -= shrink
+        self.shape = shape
 
 from py2gpu import arrayfuncs
 def make_array_reduction(name):

@@ -19,6 +19,17 @@ static idx threadIdx, blockIdx, blockDim, gridDim;
 #define __global__
 #define __device__
 
+#ifdef _WIN32
+#define fmax(a, b) (a > b ? a : b)
+#define fmin(a, b) (a < b ? a : b)
+#define max(a, b) (a > b ? a : b)
+#define min(a, b) (a < b ? a : b)
+#define EXPORT __declspec(dllexport)
+void initgpucpu() {}
+#else
+#define EXPORT
+#endif
+
 %s
 
 %s
@@ -26,7 +37,7 @@ static idx threadIdx, blockIdx, blockDim, gridDim;
 '''.lstrip()
 
 _caller = r'''
-void __caller__kernel_%(name)s(%(args)s, int __count, int __total_threads, int __cpu_count, int __thread_count) {
+EXPORT void __caller__kernel_%(name)s(%(args)s, int __count, int __total_threads, int __cpu_count, int __thread_count) {
     threadIdx.y = threadIdx.z = blockIdx.y = blockIdx.z = 0;
     gridDim.y = gridDim.z = blockDim.y = blockDim.z = 1;
     gridDim.x = __cpu_count;
@@ -114,7 +125,9 @@ class SourceModule(object):
         self.source = _base_source % (source, '\n'.join(callers))
         with open('gpucpu.cpp', 'w') as fp:
             fp.write(self.source)
-        subprocess.call(['python', 'gpucpusetup.py', 'build_ext', '--inplace'])
+        if subprocess.call(['python', 'gpucpusetup.py',
+                            'build_ext', '--inplace']) != 0:
+            raise ValueError('Could not compile GPU/CPU code')
         self.lib = ctypeslib.load_library('gpucpu','.')
 
     def get_function(self, name):
