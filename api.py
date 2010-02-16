@@ -31,7 +31,7 @@ def _rename_func(tree, name):
     tree.body[0].name = name
     return tree
 
-def blockwise(blockshapes, types, threadmemory={}, overlapping=True, center_as_origin=False,
+def blockwise(blockshapes, types, threadmemory={}, overlapping=True, center_on_origin=False,
               out_of_bounds_value=_no_bounds_check, name=None, reduce=None):
     """
     Processes the image in parallel by splitting it into equally-sized blocks.
@@ -47,8 +47,8 @@ def blockwise(blockshapes, types, threadmemory={}, overlapping=True, center_as_o
         overlapping = (overlapping,)
     else:
         overlapping = ()
-    assert overlapping or not center_as_origin, \
-        "You can't have overlapping=False and center_as_origin=True"
+    assert overlapping or not center_on_origin, \
+        "You can't have overlapping=False and center_on_origin=True"
     for varname, vartype in types.items():
         types[varname] = get_arg_type(vartype)
     def _blockwise(func):
@@ -63,7 +63,7 @@ def blockwise(blockshapes, types, threadmemory={}, overlapping=True, center_as_o
             'functype': 'blockwise',
             'blockshapes': blockshapes,
             'overlapping': overlapping,
-            'center_as_origin': center_as_origin,
+            'center_on_origin': center_on_origin,
             'out_of_bounds_value': out_of_bounds_value,
             'source': source,
             'threadmemory': threadmemory,
@@ -168,7 +168,7 @@ def make_gpu_func(func, name, info):
     blockshapes = info['blockshapes']
     threadmemory = info['threadmemory']
     overlapping = info['overlapping']
-    center_as_origin = info['center_as_origin']
+    center_on_origin = info['center_on_origin']
     types = info['types']
     argnames = inspect.getargspec(info['func']).args
     argtypes = ''.join(types[arg][0] for arg in argnames) + 'ii'
@@ -200,10 +200,10 @@ def make_gpu_func(func, name, info):
                         # of memory, sync(), and then let only the first
                         # thread in the block do the real calculation
                         # TODO: maybe we can reorder data if it's read-only?
-                        if center_as_origin:
+                        if center_on_origin:
                             assert all(dim % 2 for dim in shape), \
                                 'Block dimensions must be uneven when using ' \
-                                'center_as_origin=True. Please check %s' % argname
+                                'center_on_origin=True. Please check %s' % argname
                             blockcount = arg.data.size
                         else:
                             blockcount = (numpy.array(arg.data.shape) -
@@ -247,7 +247,7 @@ def make_emulator_func(func, name, info):
     blockshapes = info['blockshapes']
     threadmemory = info['threadmemory']
     overlapping = info['overlapping']
-    center_as_origin = info['center_as_origin']
+    center_on_origin = info['center_on_origin']
     out_of_bounds_value = info['out_of_bounds_value']
     types = info['types']
     argnames = inspect.getargspec(info['func']).args
@@ -282,7 +282,7 @@ def make_emulator_func(func, name, info):
                         if shape:
                             blockshape = shape
                             shape = numpy.array(shape)
-                            if center_as_origin:
+                            if center_on_origin:
                                 shape[...] = 1
                             numblocks = (numpy.array(arg.shape) - (shape - 1))
                             if argname in overlapping:
