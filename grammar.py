@@ -172,7 +172,7 @@ for (int i=0; i < NDIMS; i++) {
 _offset_template = r'''
 __numblocks = (%(dims)s) / (%(size)s);
 __blockpos = __rest / __numblocks;
-%(name)s.offset[%(dim)d] = __blockpos * %(dimlength)d;
+%(name)s.offset[%(dim)d] = __blockpos * %(dimlength)d%(offsetshift)s;
 __rest -= __blockpos * __numblocks;
 '''.strip();
 
@@ -323,7 +323,7 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         blockshapes = info['blockshapes']
         overlapping = info['overlapping']
         threadmemory = info['threadmemory']
-        center_as_origin = info['center_as_origin']
+        center_on_origin = info['center_on_origin']
         args = []
         for arg in func.args.args:
             origarg = arg = arg.id
@@ -347,6 +347,9 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
             if shape:
                 offsetinit.append('__rest = __block;')
                 for dim, dimlength in enumerate(shape):
+                    offsetshift = ''
+                    if origarg in overlapping and center_on_origin:
+                        offsetshift = ' - (%s / 2)' % dimlength
                     if origarg in overlapping:
                         dimlength = 1
                     if dim == len(shape) - 1:
@@ -354,10 +357,10 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
                         # block coordinates we could manipulate the data
                         # pointer directly and only use the offset for
                         # bounds checking (if needed, at all)
-                        offsetinit.append('%s.offset[%d] = __rest * %d;\n' % (
-                            arg, dim, dimlength))
+                        offsetinit.append('%s.offset[%d] = __rest * %d%s;\n' % (
+                            arg, dim, dimlength, offsetshift))
                         break
-                    if origarg in overlapping and not center_as_origin:
+                    if origarg in overlapping and not center_on_origin:
                         dims = ' * '.join('(%s.shape[%d] - (%s - 1))' % (arg, subdim, shape[subdim])
                                           for subdim in range(dim+1, len(shape)))
                     else:
@@ -370,7 +373,8 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
                                           for subdim in range(dim+1, len(shape)))
                     offsetinit.append(_offset_template % {'name': arg, 'dim': dim,
                                                           'dims': dims, 'size': size,
-                                                          'dimlength': dimlength})
+                                                          'dimlength': dimlength,
+                                                          'offsetshift': offsetshift})
 
             if kind.endswith('Array'):
                 args.append('&' + arg)

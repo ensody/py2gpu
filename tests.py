@@ -28,28 +28,11 @@ def get_index_tm(x, y):
 def reducer(x, y):
     x[0, 0] = y[0, 1] + y[1, 2] + y[2, 1] + y[1, 0]
 
-@blockwise({'x': (1, 1), 'y': (3, 3)}, {('x', 'y'): FloatArray}, overlapping=True,
-           center_as_origin=True, out_of_bounds_value=0)
-def center_reducer(x, y):
-    x[0, 0] = y[-1, 0] + y[0, 1] + y[1, 0] + y[0, -1]
 
-#@blockwise({'x': (1, 1), 'y': (3, 3)}, {('x', 'y'): FloatArray}, overlapping=True, center_as_origin=True)
-def if_center_reducer(x, y):
-    top = 0
-    bottom = 0
-    left = 0
-    right = 0
-    if y.offset[0] > 0:
-        top = y[-1, 0]
-    if y.offset[0] < y.dim[0]:
-        bottom = y[1, 0]
-    if y.offset[1] > 0:
-        left = y[0, -1]
-    if y.offset[1] < y.dim[1]:
-        right = y[0, 1]
-    x[0, 0] = top + right + bottom + left
+center_reducer = blockwise({'x': (1, 1), 'y': (3, 3)}, {('x', 'y'): FloatArray},
+    name='center_reducer', overlapping=True,  center_on_origin=True, out_of_bounds_value=0)(reducer)
 
-compile_gpu_code()
+compile_gpu_code(emulate=False)
 
 class GPUTest(TestCase):
     def assertEqualArrays(self, x, y):
