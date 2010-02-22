@@ -93,7 +93,17 @@ typedef struct /* __align__(64) */ {
 typedef %(Type)sArrayStruct* %(Type)sArray;
 '''.lstrip()
 
+_array_typedefs = (('int32', 'Int32'), ('uint32', 'UInt32'),
+                   ('int8', 'Int8'), ('float', 'Float'))
+
 _typedefs = r'''
+typedef char int8;
+typedef unsigned char uint8;
+typedef short int16;
+typedef unsigned short uint16;
+typedef int int32;
+typedef unsigned int uint32;
+
 #define NDIMS 4
 #define sync __syncthreads
 #define CPU_INDEX blockIdx.x
@@ -107,8 +117,8 @@ _typedefs = r'''
 #define imin(a, b) min(a, b)
 #define abs(x) fabs(x)
 
-'''.lstrip() + '\n'.join(_typedef_base % {'type': name, 'Type': name.capitalize()}
-                for name in ['int', 'float']) + '\n\n'
+'''.lstrip() + '\n'.join(_typedef_base % {'type': type_name, 'Type': class_name}
+                for type_name, class_name in _array_typedefs) + '\n\n'
 
 intpsize = numpy.intp(0).nbytes
 int32size = numpy.int32(0).nbytes
@@ -116,8 +126,14 @@ int32size = numpy.int32(0).nbytes
 class ArrayType(object):
     pass
 
-class IntArray(ArrayType):
+class Int32Array(ArrayType):
     dtype = numpy.int32
+
+class UInt32Array(ArrayType):
+    dtype = numpy.uint32
+
+class Int8Array(ArrayType):
+    dtype = numpy.int8
 
 class FloatArray(ArrayType):
     dtype = numpy.float32
