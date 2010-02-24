@@ -18,7 +18,7 @@ node :name = :n ?(n.__class__.__name__ == name) -> n
 attribute = node('Attribute'):n -> '%s->%s' % (self.parse(n.value, 'name'), n.attr)
 name = node('Name'):n -> name_mapper.get(n.id, n.id)
 varaccess = attribute | name
-num = node('Num'):n -> str(n.n)
+num = node('Num'):n -> str(n.n)+'f' if isinstance(n.n, float) else str(n.n)
 str = node('Str'):n -> to_string(n.s)
 anyvar = varaccess | num | str
 
@@ -128,7 +128,7 @@ def p(*x):
     print x
 
 name_mapper = {
-    'None': 'null',
+    'None': 'NULL',
     'True': 'true',
     'False': 'false',
 }
@@ -408,10 +408,8 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
             args.insert(0, arg)
             args.extend(str(arg) for arg in shape)
             name = '__array_' + name
-        elif name in ('int', 'float'):
-            name = '__' + name
-        elif name in ('min', 'max'):
-            name = 'f' + name
+        elif name in ('int', 'float', 'min', 'max', 'sqrt', 'log'):
+            name = '__py_' + name
         assert call.starargs is None
         assert call.kwargs is None
         assert call.keywords == []

@@ -111,12 +111,45 @@ typedef unsigned int uint32;
 #define THREAD_INDEX threadIdx.x
 #define THREAD_COUNT blockDim.x
 #define INSTANCE CPU_INDEX * THREAD_COUNT + THREAD_INDEX
-#define __int(x) ((int)(x))
-#define __float(x) ((float)(x))
-#define imax(a, b) max(a, b)
-#define imin(a, b) min(a, b)
+#define __py_int(x) ((int)(x))
+#define __py_float(x) ((float)(x))
+#define __py_sqrt(x) (sqrtf(x))
+#define __py_log(x) (logf(x))
 #define abs(x) fabs(x)
 
+} // extern "C"
+
+template <typename T>
+__device__ T __py_max(T a, T b) {
+    return max(a, b);
+}
+
+template <typename T>
+__device__ T __py_min(T a, T b) {
+    return min(a, b);
+}
+
+template <>
+__device__ int32 __py_max(int32 a, int32 b) {
+  return max(a, b);
+}
+
+template <>
+__device__ float __py_max(float a, float b) {
+  return fmax(a, b);
+}
+
+template <>
+__device__ int32 __py_min(int32 a, int32 b) {
+  return min(a, b);
+}
+
+template <>
+__device__ float __py_min(float a, float b) {
+  return fmin(a, b);
+}
+
+extern "C" {
 '''.lstrip() + '\n'.join(_typedef_base % {'type': type_name, 'Type': class_name}
                 for type_name, class_name in _array_typedefs) + '\n\n'
 
