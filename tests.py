@@ -1,22 +1,22 @@
-from py2gpu.api import blockwise, IntArray, FloatArray, compile_gpu_code
+from py2gpu.api import blockwise, Int32Array, FloatArray, compile_gpu_code
 from numpy import array, hstack, vstack, zeros, float32
 from numpy.random import rand
 from scipy.ndimage import sobel, convolve, label
 from unittest import TestCase
 
-@blockwise({('x', 'y'): (2, 2)}, {('x', 'y'): IntArray}, overlapping=False)
+@blockwise({('x', 'y'): (2, 2)}, {('x', 'y'): Int32Array}, overlapping=False)
 def increasing_multiplication(x, y):
     x[0, 0] = 1 * y[0, 0]
     x[0, 1] = 2 * y[0, 1]
     x[1, 0] = 3 * y[1, 0]
     x[1, 1] = 4 * y[1, 1]
 
-@blockwise({'x': (2, 1)}, {'x': IntArray}, overlapping=False)
+@blockwise({'x': (2, 1)}, {'x': Int32Array}, overlapping=False)
 def get_index(x):
     x[0, 0] = CPU_INDEX + 1
     x[1, 0] = THREAD_INDEX + 1001
 
-@blockwise({'x': (2, 1)}, {('x', 'y'): IntArray}, threadmemory={'y': (5, 5)},
+@blockwise({'x': (2, 1)}, {('x', 'y'): Int32Array}, threadmemory={'y': (5, 5)},
            overlapping=False)
 def get_index_tm(x, y):
     x[0, 0] = CPU_INDEX + 1
@@ -29,8 +29,18 @@ def reducer(x, y):
     x[0, 0] = y[0, 1] + y[1, 2] + y[2, 1] + y[1, 0]
 
 
-center_reducer = blockwise({'x': (1, 1), 'y': (3, 3)}, {('x', 'y'): FloatArray},
-    name='center_reducer', overlapping=True,  center_on_origin=True, out_of_bounds_value=0)(reducer)
+@blockwise({'x': (1, 1), 'y': (3, 3)}, {('x', 'y'): FloatArray},
+    overlapping=True,  center_on_origin=True)
+def center_reducer(x, y):
+    x[0, 0] = 0
+    if x.offset[0]:
+        x[0, 0] += y[0, 1]
+    if x.offset[1] < x.shape[1] - 1:
+        x[0, 0] += y[1, 2]
+    if x.offset[0] < x.shape[0] - 1:
+        x[0, 0] += y[2, 1]
+    if x.offset[1]:
+        x[0, 0] += y[1, 0]
 
 compile_gpu_code(emulate=False)
 

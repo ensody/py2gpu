@@ -7,7 +7,6 @@ from pymeta.runtime import ParseError, EOFError
 
 # Globals for storing type information about registered functions
 _gpu_funcs = {}
-_no_bounds_check = object()
 
 class Py2GPUParseError(ValueError):
     pass
@@ -165,7 +164,7 @@ _array_def = r'''
 __array_%(name)s.data = %(name)s;
 for (int i=0; i < NDIMS; i++) {
     __array_%(name)s.shape[i] = __dim_%(name)s[i];
-    __array_%(name)s.offset[i] = 0;
+    %(offset)s
 }
 '''.lstrip()
 
@@ -269,7 +268,6 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         access = []
         shifted_indices = []
         for dim, index in enumerate(indices):
-            index = '(%s->offset[%d] + %s)' % (name, dim, index)
             shifted_indices.append(index)
             access.append(' * '.join(['%s->shape[%d]' % (name, subdim)
                                       for subdim in range(dim+1, dims)] + [index]))
@@ -277,17 +275,6 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
 
         # Check bounds, if necessary
         info = _gpu_funcs[self.func_name]
-        default = info['out_of_bounds_value']
-        if default is not _no_bounds_check:
-            blockshape = info['blockshapes'].get(name)
-            if blockshape is not None and blockshape != (1,) * len(blockshape):
-                bounds_check = ' && '.join('%s %s' % (index, check)
-                                           for check in ('>= 0', '< %s->shape[%d]' % (name, dim))
-                                           for dim, index in enumerate(shifted_indices))
-                if assigning:
-                    subscript = 'if (%s) %s' % (bounds_check, subscript)
-                else:
-                    subscript = '(%s ? %s : %s)' % (bounds_check, subscript, default)
         return subscript
 
     def gen_func(self, func, level):
@@ -329,7 +316,9 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
             origarg = arg = arg.id
             kind = types[arg][1]
             if kind.endswith('Array'):
-                blockinit.append(_array_def % {'name': arg, 'type': kind})
+                offset = '__array_%s.offset[i] = 0;' % arg
+                blockinit.append(_array_def % {'name': arg, 'type': kind,
+                                               'offset': offset})
                 origarg = arg
                 arg = '__array_' + arg
 
@@ -346,6 +335,7 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
             shape = blockshapes.get(origarg)
             if shape:
                 offsetinit.append('__rest = __block;')
+                offsetinit.append('%s.data = %s;' % (arg, origarg))
                 for dim, dimlength in enumerate(shape):
                     offsetshift = ''
                     if origarg in overlapping and center_on_origin:
@@ -353,19 +343,18 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
                     if origarg in overlapping:
                         dimlength = 1
                     if dim == len(shape) - 1:
-                        # TODO: instead of having to add offset to calculate
-                        # block coordinates we could manipulate the data
-                        # pointer directly and only use the offset for
-                        # bounds checking (if needed, at all)
+                        offsetinit.append('%s.data += __rest * %d%s;' % (
+                            arg, dimlength, offsetshift))
                         offsetinit.append('%s.offset[%d] = __rest * %d%s;\n' % (
                             arg, dim, dimlength, offsetshift))
                         break
+                    datadims = ' * '.join('%s.shape[%d]' % (arg, subdim)
+                                          for subdim in range(dim+1, len(shape)))
                     if origarg in overlapping and not center_on_origin:
                         dims = ' * '.join('(%s.shape[%d] - (%s - 1))' % (arg, subdim, shape[subdim])
                                           for subdim in range(dim+1, len(shape)))
                     else:
-                        dims = ' * '.join('%s.shape[%d]' % (arg, subdim)
-                                          for subdim in range(dim+1, len(shape)))
+                        dims = datadims
                     if origarg in overlapping:
                         size = '1'
                     else:
@@ -375,6 +364,8 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
                                                           'dims': dims, 'size': size,
                                                           'dimlength': dimlength,
                                                           'offsetshift': offsetshift})
+                    offsetinit.append('%s.data += %s * (__blockpos * %d%s);' % (
+                        arg, datadims, dimlength, offsetshift))
 
             if kind.endswith('Array'):
                 args.append('&' + arg)

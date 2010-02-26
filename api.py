@@ -12,7 +12,7 @@ except ImportError:
     print >>sys.stderr, 'pycuda not found. Only emulation will work.'
     def splay(*args):
         return (512, 1), (32, 1, 1)
-from py2gpu.grammar import _gpu_funcs, convert, make_prototype, _no_bounds_check
+from py2gpu.grammar import _gpu_funcs, convert, make_prototype
 from textwrap import dedent
 
 # TODO: implement reduction support
@@ -32,7 +32,7 @@ def _rename_func(tree, name):
     return tree
 
 def blockwise(blockshapes, types, threadmemory={}, overlapping=True, center_on_origin=False,
-              out_of_bounds_value=_no_bounds_check, name=None, reduce=None):
+              name=None, reduce=None):
     """
     Processes the image in parallel by splitting it into equally-sized blocks.
 
@@ -64,7 +64,6 @@ def blockwise(blockshapes, types, threadmemory={}, overlapping=True, center_on_o
             'blockshapes': blockshapes,
             'overlapping': overlapping,
             'center_on_origin': center_on_origin,
-            'out_of_bounds_value': out_of_bounds_value,
             'source': source,
             'threadmemory': threadmemory,
             'types': types,
@@ -85,7 +84,7 @@ def blockwise(blockshapes, types, threadmemory={}, overlapping=True, center_on_o
     return _blockwise
 
 _typedef_base = r'''
-typedef struct /* __align__(64) */ {
+typedef struct /* __align__(16) */ {
     %(type)s *data;
     int shape[NDIMS];
     int offset[NDIMS];
@@ -280,7 +279,6 @@ def make_gpu_func(func, name, info):
             threadcount = count
         threadcount = int(threadcount)
         grid, block = splay(threadcount)
-        print name, threadcount, grid[0] * block[0], grid[0], 'x', block[0]
         threadcount = min(grid[0] * block[0], threadcount)
         kernel_args.extend((count, threadcount))
         func.set_block_shape(*block)
@@ -297,7 +295,6 @@ def make_emulator_func(func, name, info):
     threadmemory = info['threadmemory']
     overlapping = info['overlapping']
     center_on_origin = info['center_on_origin']
-    out_of_bounds_value = info['out_of_bounds_value']
     types = info['types']
     argnames = inspect.getargspec(info['func']).args
     def _emulator_func(*args):
@@ -344,8 +341,7 @@ def make_emulator_func(func, name, info):
                                 offset[dim] *= shape[dim]
                             offset[-1] = rest * shape[-1]
                             print argname, offset, numblocks, blockshape, arg.shape
-                            arg = EmulatedArray(arg, blockshape, offset=offset,
-                                out_of_bounds_value=out_of_bounds_value)
+                            arg = EmulatedArray(arg, blockshape, offset=offset)
 
                         if not isinstance(arg, EmulatedArray):
                             arg = EmulatedArray(arg, None)
@@ -365,23 +361,19 @@ def make_emulator_func(func, name, info):
     return _emulator_func
 
 class EmulatedArray(object):
-    def __init__(self, data, blockshape, offset=None, out_of_bounds_value=None):
+    def __init__(self, data, blockshape, offset=None):
         self.data = data
         self.blockshape = blockshape
         self.shape = data.shape
         if offset is None:
             offset = 4 * (0,)
         self.offset = offset
-        self.out_of_bounds_value = out_of_bounds_value
 
     def _convert_index(self, index):
         if not isinstance(index, (tuple, list)):
             index = (index,)
         index = numpy.array(index)
         index += numpy.array(self.offset[:index.size])
-        if self.out_of_bounds_value is not _no_bounds_check:
-            if (index < 0).any() or (index >= numpy.array(self.shape[:index.size])).any():
-                return None
         if index.size > 1:
             index = tuple(index)
         else:
@@ -390,8 +382,6 @@ class EmulatedArray(object):
 
     def __getitem__(self, index):
         index = self._convert_index(index)
-        if index is None:
-            return self.out_of_bounds_value
         return self.data[index]
 
     def __setitem__(self, index, value):
@@ -424,7 +414,7 @@ def compile_gpu_code(emulate=False):
         source.insert(0, ';\n'.join(info['prototypes'].values()) + ';\n')
     source.insert(0, _typedefs)
     source = ''.join(source)
-    mod = SourceModule(source)
+    mod = SourceModule(source, keep=True)
     for name, info in _gpu_funcs.items():
         if 'return' in info['types']:
             continue
@@ -441,7 +431,7 @@ def emulate_gpu_code():
 class GPUArray(object):
     emulate = False
 
-    def __init__(self, data, dtype=None, copy_to_device=True):
+    def __init__(self, data, dtype=None, copy_to_device=True, stream=None):
         self.data = data
         if dtype:
             data = data.astype(dtype)
@@ -466,7 +456,12 @@ class GPUArray(object):
             return
         self.data[...] = driver.from_device_like(self.pointer, self.data)
 
-    def set_shape(self, shape):
+    @property
+    def shape(self):
+        return self._shape
+
+    @shape.setter
+    def shape(self, shape):
         shape = tuple(shape)
         shape += (0,) * (4 - len(shape))
         shape = numpy.array(shape, dtype=numpy.int32)
@@ -481,10 +476,7 @@ class GPUArray(object):
         if self.emulate:
             self._shape[:] = shape
         else:
-            memcpy_htod(self._shape, buffer(shape))
-    def get_shape(self):
-        return self._shape
-    shape = property(get_shape, set_shape)
+            driver.memcpy_htod(self._shape, buffer(shape))
 
     def shrink_from_original_shape(self, shrink):
         shape = numpy.array(self.data.shape, dtype=numpy.int32)
