@@ -18,6 +18,7 @@ static idx threadIdx, blockIdx, blockDim, gridDim;
 
 #define __global__
 #define __device__
+#define __syncthreads()
 
 #ifdef _WIN32
 #define fmax(a, b) (a > b ? a : b)
