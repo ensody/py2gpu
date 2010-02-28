@@ -75,35 +75,24 @@ def to_device(data):
     memcpy_htod(mem, data)
     return mem
 
-def _splay_backend(n, dev):
-    # heavily modified from cublas
-    from pycuda.tools import DeviceData
-    devdata = DeviceData(dev)
-
-    min_threads = devdata.warp_size
-    max_threads = 128
-    max_blocks = 4 * devdata.thread_blocks_per_mp \
-            * dev.get_attribute(drv.device_attribute.MULTIPROCESSOR_COUNT)
-
-    if n < min_threads:
-        block_count = 1
-        threads_per_block = min_threads
-    elif n < (max_blocks * min_threads):
-        block_count = (n + min_threads - 1) // min_threads
-        threads_per_block = min_threads
-    elif n < (max_blocks * max_threads):
-        block_count = max_blocks
-        grp = (n + min_threads - 1) // min_threads
-        threads_per_block = ((grp + max_blocks -1) // max_blocks) * min_threads
-    else:
-        block_count = max_blocks
-        threads_per_block = max_threads
-
-    #print "n:%d bc:%d tpb:%d" % (n, block_count, threads_per_block)
-    return (block_count, 1), (threads_per_block, 1, 1)
-
-def splay(*args):
-    return (512, 1), (32, 1, 1)
+def splay(dims):
+    grid = []
+    block = []
+    dimcount = len(dims)
+    if dimcount < 3:
+        dims += (3 - dimcount) * (1,)
+    for dim, size in enumerate(dims):
+        if dim == 2 and size == 1:
+            cpus = threads = 1
+        else:
+            # TODO: Optimize by calculating register usage
+            threads = 64 if dimcount == 1 else 16
+            if (dimcount == 1 and size) < 256 or (dimcount > 1 and size < 64):
+                threads /= 2
+            cpus = (size + threads - 1) // threads
+        grid.append(cpus)
+        block.append(threads)
+    return grid, block
 
 _base_source = r'''
 extern "C" {
@@ -125,8 +114,10 @@ void initgpucpu() {}
 '''.lstrip()
 
 _caller = r'''
-EXPORT void __caller__kernel_%(name)s(%(args)s, int __count, int __total_threads, int __cpu_count, int __thread_count) {
-    __kernel_%(name)s<<< __cpu_count, __thread_count >>>(%(callargs)s, __count, __total_threads);
+EXPORT void __caller__kernel_%(name)s(%(args)s, int __cpus0, int __cpus1, int __cpus2, int __threads0, int __threads1, int __threads2) {
+    dim3 __cpu_count(__cpus0, __cpus1, __cpus2);
+    dim3 __thread_count(__threads0, __threads1, __threads2);
+    __kernel_%(name)s<<< __cpu_count, __thread_count >>>(%(callargs)s);
 }
 '''.lstrip()
 
@@ -152,8 +143,7 @@ class Function(object):
 
     def __call__(self, cpu_count, thread_count, *args):
         args = list(args)
-        args.extend((cpu_count, thread_count))
-        print args
+        args.extend(cpu_count + thread_count)
         return self.func(*args)
 
 class SourceModule(object):
