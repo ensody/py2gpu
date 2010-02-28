@@ -42,7 +42,7 @@ def center_reducer(x, y):
     if x.offset[1]:
         x[0, 0] += y[1, 0]
 
-compile_gpu_code(emulate=False)
+compile_gpu_code()
 
 class GPUTest(TestCase):
     def assertEqualArrays(self, x, y):
