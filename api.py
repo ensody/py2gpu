@@ -182,8 +182,7 @@ def make_gpu_func(func, name, info):
     def _gpu_func(*args):
         kernel_args = []
         arrays = []
-        grid = (1, 1, 1)
-        count = threadcount = block = 0
+        dims = None
         for argname, arg in zip(argnames, args):
             if isinstance(arg, numpy.ndarray):
                 arg = GPUArray(arg, dtype=types[argname][2])
@@ -192,12 +191,6 @@ def make_gpu_func(func, name, info):
                 assert arg.dtype == types[argname][2], \
                     "The data type (%s) of the argument %s doesn't match " \
                     'the function definition (%s)' % (arg.dtype, argname, types[argname][2])
-                shape = get_shape(threadmemory.get(argname), argnames, args)
-                if shape:
-                    old_threadcount = threadcount
-                    threadcount = arg.data.size / numpy.array(shape).prod()
-                    if old_threadcount:
-                        threadcount = min(old_threadcount, threadcount)
                 shape = get_shape(blockshapes.get(argname), argnames, args)
                 if shape:
                     if argname in overlapping and shape != (1,) * len(shape):
@@ -210,36 +203,38 @@ def make_gpu_func(func, name, info):
                             assert all(dim % 2 for dim in shape), \
                                 'Block dimensions must be uneven when using ' \
                                 'center_on_origin=True. Please check %s' % argname
-                            blockcount = arg.data.size
+                            argdims = arg.shape
                         else:
-                            blockcount = (numpy.array(arg.data.shape) -
-                                          (numpy.array(shape) - 1)).prod()
+                            argdims = tuple(numpy.array(arg.shape) -
+                                               (numpy.array(shape) - 1))
                     else:
                         assert not any(dim1 % dim2 for dim1, dim2
-                                       in zip(arg.data.shape, shape)), \
+                                       in zip(arg.shape, shape)), \
                             'Size of argument "%s" must be an integer ' \
                             'multiple of its block size when using ' \
                             'non-overlapping blocks.' % argname
                         # TODO: reorder pixels for locality
-                        blockcount = arg.data.size / numpy.array(shape).prod()
-                    if count:
-                        assert count == blockcount, \
+                        argdims = tuple(numpy.array(arg.shape) /
+                                        numpy.array(shape))
+
+                    if dims is None:
+                        dims = argdims
+                    else:
+                        assert argdims == dims, \
                             'Number of blocks of argument "%s" (%d) ' \
                             "doesn't match the preceding blockwise " \
-                            'arguments (%d).' % (argname, blockcount, count)
-                    count = int(blockcount)
-                kernel_args.extend((arg.pointer, arg.shape))
+                            'arguments (%d).' % (argname, argdims, dims)
+                kernel_args.append(arg)
+                shape = arg.shape
+                if len(shape) < 3:
+                    shape += (3 - len(shape)) * (1,)
+                kernel_args.extend(shape)
                 continue
             kernel_args.append(arg)
 
         # Determine number of blocks
-        if not threadcount:
-            threadcount = count
-        threadcount = int(threadcount)
-        grid, block = driver.splay(threadcount)
-        threadcount = min(grid[0] * block[0], threadcount)
-        kernel_args.extend((count, threadcount))
-        func(grid[0], block[0], *kernel_args)
+        grid, block = driver.splay(dims)
+        func(grid, block, *kernel_args)
         # Now copy temporary arrays back
         for gpuarray in arrays:
             # TODO: reverse pixel reordering if needed
@@ -270,8 +265,6 @@ class GPUArray(object):
             dtype = data.dtype
         self.dtype = dtype
 
-        self.shape = data.shape
-
         # data
         if copy_to_device:
             self.pointer = driver.to_device(data)
@@ -283,24 +276,15 @@ class GPUArray(object):
 
     @property
     def shape(self):
-        return self._shape
+        return self.data.shape
 
-    @shape.setter
-    def shape(self, shape):
-        shape = tuple(shape)
-        shape += (0,) * (4 - len(shape))
-        shape = numpy.array(shape, dtype=numpy.int32)
+    @property
+    def size(self):
+        return self.data.size
 
-        if not hasattr(self, '_shape'):
-            self._shape = driver.mem_alloc_like(shape)
-        driver.memcpy_htod(self._shape, shape)
-
-    def shrink_from_original_shape(self, shrink):
-        shape = numpy.array(self.data.shape, dtype=numpy.int32)
-        shrink = numpy.array(shrink, dtype=numpy.int32)
-        assert (shrink >= 0).all()
-        shape[:len(shrink)] -= shrink
-        self.shape = shape
+    @property
+    def _as_parameter_(self):
+        return self.pointer._as_parameter
 
 from . import arrayfuncs
 def make_array_reduction(name):
