@@ -72,18 +72,6 @@ def blockwise(blockshapes, types, threadmemory={}, overlapping=True, center_on_o
         return _call_blockwise
     return _blockwise
 
-_typedef_base = r'''
-typedef struct /* __align__(16) */ {
-    %(type)s *data;
-    int shape[NDIMS];
-    int offset[NDIMS];
-} %(Type)sArrayStruct;
-typedef %(Type)sArrayStruct* %(Type)sArray;
-'''.lstrip()
-
-_array_typedefs = (('int32', 'Int32'), ('uint32', 'UInt32'),
-                   ('int8', 'Int8'), ('float', 'Float'))
-
 _typedefs = r'''
 typedef char int8;
 typedef unsigned char uint8;
@@ -92,29 +80,34 @@ typedef unsigned short uint16;
 typedef int int32;
 typedef unsigned int uint32;
 
-#define NDIMS 4
 #define sync __syncthreads
-#define CPU_INDEX blockIdx.x
-#define CPU_COUNT gridDim.x
-#define THREAD_INDEX threadIdx.x
-#define THREAD_COUNT blockDim.x
-#define INSTANCE CPU_INDEX * THREAD_COUNT + THREAD_INDEX
+#define CPU_INDEX0 blockIdx.x
+#define CPU_INDEX1 blockIdx.y
+#define CPU_INDEX2 blockIdx.z
+#define CPU_INDEX(id) CPU_INDEX##id
+#define CPU_COUNT0 gridDim.x
+#define CPU_COUNT1 gridDim.y
+#define CPU_COUNT2 gridDim.z
+#define CPU_COUNT(id) CPU_COUNT##id
+#define THREAD_INDEX0 threadIdx.x
+#define THREAD_INDEX1 threadIdx.y
+#define THREAD_INDEX2 threadIdx.z
+#define THREAD_INDEX(id) THREAD_INDEX##id
+#define THREAD_COUNT0 blockDim.x
+#define THREAD_COUNT1 blockDim.y
+#define THREAD_COUNT2 blockDim.z
+#define THREAD_COUNT(id) THREAD_COUNT##id
+#define BLOCK(id) (CPU_COUNT(id) * THREAD_COUNT(id) + THREAD_INDEX(id))
 #define __py_int(x) ((int)(x))
 #define __py_float(x) ((float)(x))
-#define __py_sqrt(x) (sqrtf(x))
-#define __py_log(x) (logf(x))
-#define abs(x) fabs(x)
+#define __py_sqrt(x) sqrtf(x)
+#define __py_log(x) logf(x)
 
 } // extern "C"
 
 template <typename T>
 __device__ T __py_max(T a, T b) {
     return max(a, b);
-}
-
-template <typename T>
-__device__ T __py_min(T a, T b) {
-    return min(a, b);
 }
 
 template <>
@@ -125,6 +118,26 @@ __device__ int32 __py_max(int32 a, int32 b) {
 template <>
 __device__ float __py_max(float a, float b) {
   return fmax(a, b);
+}
+
+template <typename T>
+__device__ T __py_abs(T x) {
+    return abs(x);
+}
+
+template <>
+__device__ int32 __py_abs(int32 x) {
+  return abs(x);
+}
+
+template <>
+__device__ float __py_abs(float x) {
+  return fabs(x);
+}
+
+template <typename T>
+__device__ T __py_min(T a, T b) {
+    return min(a, b);
 }
 
 template <>
@@ -138,8 +151,8 @@ __device__ float __py_min(float a, float b) {
 }
 
 extern "C" {
-'''.lstrip() + '\n'.join(_typedef_base % {'type': type_name, 'Type': class_name}
-                for type_name, class_name in _array_typedefs) + '\n\n'
+
+'''.lstrip()
 
 intpsize = numpy.intp(0).nbytes
 int32size = numpy.int32(0).nbytes

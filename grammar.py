@@ -159,43 +159,12 @@ _func_template = r'''
 }
 '''.lstrip()
 
-_array_def = r'''
-%(type)sStruct __array_%(name)s;
-__array_%(name)s.data = %(name)s;
-for (int i=0; i < NDIMS; i++) {
-    __array_%(name)s.shape[i] = __dim_%(name)s[i];
-    %(offset)s
-}
-'''.lstrip()
-
-_offset_template = r'''
-__numblocks = (%(dims)s) / (%(size)s);
-__blockpos = __rest / __numblocks;
-%(name)s.offset[%(dim)d] = __blockpos * %(dimlength)d%(offsetshift)s;
-__rest -= __blockpos * __numblocks;
-'''.strip();
-
 # TODO: Maximize processor usage instead of thread usage!
 _kernel_body = r'''
-int __gpu_thread_index = INSTANCE;
-int __block, __blocks_per_thread, __end, __rest, __blockpos, __numblocks;
-
 %(declarations)s
 
-__blocks_per_thread = (__count + __total_threads - 1) / __total_threads;
-__block = __gpu_thread_index * __blocks_per_thread;
-__end = __block + __blocks_per_thread;
-
-if (__end > __count)
-    __end = __count;
-
-%(threadmemory)s
-
-for (; __block < __end; __block++) {
-    %(offset)s
-    %(call)s
-}
-'''.lstrip()
+%(call)s
+'''.strip()
 
 def make_prototype(func, func_type, name, info):
         try:
@@ -210,9 +179,9 @@ def make_prototype(func, func_type, name, info):
         funcargs = []
         for arg in args:
             kind = types[arg][1]
-            if func_type == '__global__' and kind.endswith('Array'):
+            if kind.endswith('Array'):
                 funcargs.append('%s *%s' % (types[arg][3], arg))
-                funcargs.append('int *__dim_%s' % arg)
+                funcargs.extend('int32 __%s_shape%d' % (arg, dim) for dim in range(3))
             else:
                 funcargs.append('%s %s' % (kind, arg))
 
@@ -222,8 +191,6 @@ def make_prototype(func, func_type, name, info):
             'func_type': func_type,
             'return_type': types.get('return', (0, 'void'))[1],
         }
-        if func_type == '__global__':
-             data['args'] += ', int __count, int __total_threads'
         prototype = _func_prototype % data
         info['prototypes'][func_type] = prototype
         return prototype
@@ -264,17 +231,38 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         dims = len(indices)
         if '->' in name:
             assert dims == 1, 'Attribute values can only be one-dimensional.'
-            return '%s[%s]' % (name, indices[0])
+            name, attr = name.rsplit('->', 1)
+            if attr == 'offset':
+                info = _gpu_funcs[self.func_name]
+                blockshapes = info['blockshapes']
+                overlapping = info['overlapping']
+                threadmemory = info['threadmemory']
+                center_on_origin = info['center_on_origin']
+                if name in threadmemory:
+                    return '0'
+                shape = blockshapes.get(name)
+                if shape:
+                    try:
+                        dim = int(indices[0])
+                    except:
+                        raise ValueError('Offset must be an integer')
+                    return self.get_block_init(name, dim, shape[dim],
+                        name in overlapping, center_on_origin)[2]
+                else:
+                    raise ValueError('%s is not an array' % name)
+            elif attr == 'shape':
+                shape = '__%s_shape3' % name
+                for dim in reversed(range(2)):
+                    shape = '(%s == %d ? __%s_shape%d : %s)' % (indices[0], dim, name, dim, shape)
+            else:
+                return '%s->%s[%s]' % (name, attr, indices[0])
         access = []
         shifted_indices = []
         for dim, index in enumerate(indices):
             shifted_indices.append(index)
-            access.append(' * '.join(['%s->shape[%d]' % (name, subdim)
+            access.append(' * '.join(['__%s_shape%d' % (name, subdim)
                                       for subdim in range(dim+1, dims)] + [index]))
-        subscript = '%s->data[%s]' % (name, ' + '.join(access))
-
-        # Check bounds, if necessary
-        info = _gpu_funcs[self.func_name]
+        subscript = '%s[%s]' % (name, ' + '.join(access))
         return subscript
 
     def gen_func(self, func, level):
@@ -305,8 +293,6 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
 
         # Generate kernel that shifts block by offset and calls device function
         blockinit = []
-        offsetinit = []
-        threadmeminit = []
         blockshapes = info['blockshapes']
         overlapping = info['overlapping']
         threadmemory = info['threadmemory']
@@ -315,16 +301,14 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         for arg in func.args.args:
             origarg = arg = arg.id
             kind = types[arg][1]
-            if kind.endswith('Array'):
-                offset = '__array_%s.offset[i] = 0;' % arg
-                blockinit.append(_array_def % {'name': arg, 'type': kind,
-                                               'offset': offset})
-                origarg = arg
+
+            if kind.endswith('Array') and arg in blockshapes or arg in threadmemory:
                 arg = '__array_' + arg
 
             shape = threadmemory.get(origarg)
             if shape:
-                threadmeminit.append('%s.data += __gpu_thread_index * %s;' % (
+                threadmeminit = []
+                threadmeminit.append('%s += __gpu_thread_index * %s;' % (
                                      arg, ' * '.join(str(dim) for dim in shape)))
                 threadmeminit.append(' = '.join('%s.offset[%d]' % (arg, dim)
                                                 for dim in range(len(shape)))
@@ -334,47 +318,24 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
 
             shape = blockshapes.get(origarg)
             if shape:
-                offsetinit.append('__rest = __block;')
-                offsetinit.append('%s.data = %s;' % (arg, origarg))
+                offsetinit = []
                 for dim, dimlength in enumerate(shape):
-                    offsetshift = ''
-                    if origarg in overlapping and center_on_origin:
-                        offsetshift = ' - (%s / 2)' % dimlength
-                    if origarg in overlapping:
-                        dimlength = 1
+                    block, limit, shift = self.get_block_init(origarg, dim,
+                        dimlength, origarg in overlapping, center_on_origin)
+                    blockinit.append('if (%s > %s)\n    return;' % (block, limit))
                     if dim == len(shape) - 1:
-                        offsetinit.append('%s.data += __rest * %d%s;' % (
-                            arg, dimlength, offsetshift))
-                        offsetinit.append('%s.offset[%d] = __rest * %d%s;\n' % (
-                            arg, dim, dimlength, offsetshift))
-                        break
-                    datadims = ' * '.join('%s.shape[%d]' % (arg, subdim)
-                                          for subdim in range(dim+1, len(shape)))
-                    if origarg in overlapping and not center_on_origin:
-                        dims = ' * '.join('(%s.shape[%d] - (%s - 1))' % (arg, subdim, shape[subdim])
-                                          for subdim in range(dim+1, len(shape)))
+                        offsetinit.append(block)
                     else:
-                        dims = datadims
-                    if origarg in overlapping:
-                        size = '1'
-                    else:
-                        size = ' * '.join('%d' % shape[subdim]
-                                          for subdim in range(dim+1, len(shape)))
-                    offsetinit.append(_offset_template % {'name': arg, 'dim': dim,
-                                                          'dims': dims, 'size': size,
-                                                          'dimlength': dimlength,
-                                                          'offsetshift': offsetshift})
-                    offsetinit.append('%s.data += %s * (__blockpos * %d%s);' % (
-                        arg, datadims, dimlength, offsetshift))
+                        offsetinit.append('__%s_shape%d * %s' % (origarg, dim+1, shift))
+                blockinit.append('%s *%s = %s + %s;' % (
+                    types[origarg][3], arg, origarg, ' + '.join(offsetinit)))
 
-            if kind.endswith('Array'):
-                args.append('&' + arg)
-                continue
             args.append(arg)
+            if kind.endswith('Array'):
+                args.extend('__%s_shape%d' % (origarg, dim) for dim in range(3))
+
         bodydata = {
-            'declarations': '%s' % ''.join(blockinit),
-            'offset': indent_source(level + 1, '\n'.join(offsetinit)).lstrip(),
-            'threadmemory': indent_source(level, '\n'.join(threadmeminit)).lstrip(),
+            'declarations': '%s' % '\n'.join(blockinit),
             'call': '%s(%s);' % (func.name, ', '.join(args)),
         }
         data['func'] = make_prototype(func, '__global__', '__kernel_' + name, info)
@@ -386,6 +347,20 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
 
         return source
 
+    def get_block_init(self, name, dim, dimlength, overlapping, center_on_origin):
+        block = 'BLOCK(%d)' % dim
+        if overlapping:
+            if center_on_origin:
+                limit = '__%s_shape%d' % (name, dim)
+                shift = '%s - %s/2' % (block, dimlength)
+            else:
+                limit = '__%s_shape%d - (%s - 1)' % (name, dim, dimlength)
+                shift = block
+        else:
+            limit = '__%s_shape%d/%s - 1' % (name, dim, dimlength)
+            shift = '%s * %s' % (block, dimlength)
+        return block, limit, shift
+
     def gen_call(self, call):
         name = self.parse(call.func, 'varaccess')
         args = [self.parse(arg, 'op') for arg in call.args]
@@ -396,10 +371,12 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
             if info['types'][arg][2].name == 'float32':
                 name = 'f' + name
             name += '%dd' % len(shape)
-            args.insert(0, arg)
+            dimargs = ', '.join('__%s_shape%d' % (arg, dim) for dim in range(3))
+            args.insert(0, '%s, %s' % (arg, dimargs))
             args.extend(str(arg) for arg in shape)
             name = '__array_' + name
-        elif name in ('int', 'float', 'min', 'max', 'sqrt', 'log'):
+        elif name in ('int', 'float', 'min', 'max', 'sqrt', 'log', 'abs'):
+            # These functions are specialized via templates
             name = '__py_' + name
         assert call.starargs is None
         assert call.kwargs is None
