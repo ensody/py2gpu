@@ -137,7 +137,7 @@ class Function(object):
 
     def prepare(self, argtypes):
         types = []
-        for argtype in argtypes + 'ii':
+        for argtype in argtypes + 'iiiiii':
             types.append(_argtypes[argtype])
         self.func.argtypes = types
 

@@ -11,19 +11,6 @@ def increasing_multiplication(x, y):
     x[1, 0] = 3 * y[1, 0]
     x[1, 1] = 4 * y[1, 1]
 
-@blockwise({'x': (2, 1)}, {'x': Int32Array}, overlapping=False)
-def get_index(x):
-    x[0, 0] = CPU_INDEX + 1
-    x[1, 0] = THREAD_INDEX + 1001
-
-@blockwise({'x': (2, 1)}, {('x', 'y'): Int32Array}, threadmemory={'y': (5, 5)},
-           overlapping=False)
-def get_index_tm(x, y):
-    x[0, 0] = CPU_INDEX + 1
-    x[1, 0] = THREAD_INDEX + 1001
-    y[0, 0] = CPU_INDEX + 1
-    y[1, 0] = THREAD_INDEX + 1001
-
 @blockwise({'x': (1, 1), 'y': (3, 3)}, {('x', 'y'): FloatArray}, overlapping=True)
 def reducer(x, y):
     x[0, 0] = y[0, 1] + y[1, 2] + y[2, 1] + y[1, 0]
@@ -61,27 +48,6 @@ class GPUTest(TestCase):
         x = y.copy()
         increasing_multiplication(x, y)
         self.assertEqualArrays(x, y * multiplier)
-
-    def test_get_index(self):
-        height, width = 20, 21
-        data = zeros((height, width), dtype=int)
-        get_index(data)
-        thread = 1001
-        cpu = 0
-        for y in range(0, height, 2):
-            for x in range(width):
-                if data[y, x] == cpu + 1:
-                    thread = 1001
-                    cpu += 1
-                self.assertEquals(data[y, x], cpu)
-                self.assertEquals(data[y+1, x], thread)
-                thread += 1
-
-    def test_get_index_tm(self):
-        height, width = 200, 210
-        data = zeros((height, width), dtype=int)
-        tm = zeros((10, 20), dtype=int)
-        get_index_tm(data, tm)
 
     def test_reducer(self):
         y = array([[1, 2, 5, 6, 9],
