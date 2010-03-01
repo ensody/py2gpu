@@ -251,9 +251,10 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
                 else:
                     raise ValueError('%s is not an array' % name)
             elif attr == 'shape':
-                shape = '__%s_shape3' % name
+                shape = '__%s_shape2' % name
                 for dim in reversed(range(2)):
                     shape = '(%s == %d ? __%s_shape%d : %s)' % (indices[0], dim, name, dim, shape)
+                return shape
             else:
                 return '%s->%s[%s]' % (name, attr, indices[0])
         access = []
@@ -305,16 +306,10 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
             if kind.endswith('Array') and arg in blockshapes or arg in threadmemory:
                 arg = '__array_' + arg
 
-            shape = threadmemory.get(origarg)
-            if shape:
-                threadmeminit = []
-                threadmeminit.append('%s += __gpu_thread_index * %s;' % (
-                                     arg, ' * '.join(str(dim) for dim in shape)))
-                threadmeminit.append(' = '.join('%s.offset[%d]' % (arg, dim)
-                                                for dim in range(len(shape)))
-                                     + ' = 0;')
-                threadmeminit.extend('%s.shape[%d] = %s;' % (arg, dim, dimlength)
-                                     for dim, dimlength in enumerate(shape))
+            tmshape = threadmemory.get(origarg)
+            if tmshape:
+                blockinit.append('%s *%s = %s + GLOBAL_INDEX;' % (
+                    types[origarg][3], arg, origarg))
 
             shape = blockshapes.get(origarg)
             if shape:
@@ -322,17 +317,21 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
                 for dim, dimlength in enumerate(shape):
                     block, limit, shift = self.get_block_init(origarg, dim,
                         dimlength, origarg in overlapping, center_on_origin)
-                    blockinit.append('if (%s > %s)\n    return;' % (block, limit))
+                    blockinit.append('if (%s >= %s)\n    return;' % (block, limit))
                     if dim == len(shape) - 1:
-                        offsetinit.append(block)
+                        offsetinit.append(shift)
                     else:
                         offsetinit.append('__%s_shape%d * %s' % (origarg, dim+1, shift))
                 blockinit.append('%s *%s = %s + %s;' % (
                     types[origarg][3], arg, origarg, ' + '.join(offsetinit)))
 
             args.append(arg)
+
             if kind.endswith('Array'):
-                args.extend('__%s_shape%d' % (origarg, dim) for dim in range(3))
+                if tmshape:
+                    args.extend(str(x) for x in tmshape + (3 - len(tmshape)) * (1,))
+                else:
+                    args.extend('__%s_shape%d' % (origarg, dim) for dim in range(3))
 
         bodydata = {
             'declarations': '%s' % '\n'.join(blockinit),
@@ -352,12 +351,12 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         if overlapping:
             if center_on_origin:
                 limit = '__%s_shape%d' % (name, dim)
-                shift = '%s - %s/2' % (block, dimlength)
+                shift = '(%s - %s/2)' % (block, dimlength)
             else:
                 limit = '__%s_shape%d - (%s - 1)' % (name, dim, dimlength)
                 shift = block
         else:
-            limit = '__%s_shape%d/%s - 1' % (name, dim, dimlength)
+            limit = '__%s_shape%d/%s' % (name, dim, dimlength)
             shift = '%s * %s' % (block, dimlength)
         return block, limit, shift
 

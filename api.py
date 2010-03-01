@@ -97,7 +97,8 @@ typedef unsigned int uint32;
 #define THREAD_COUNT1 blockDim.y
 #define THREAD_COUNT2 blockDim.z
 #define THREAD_COUNT(id) THREAD_COUNT##id
-#define BLOCK(id) (CPU_COUNT(id) * THREAD_COUNT(id) + THREAD_INDEX(id))
+#define BLOCK(id) (CPU_INDEX(id) * THREAD_COUNT(id) + THREAD_INDEX(id))
+#define GLOBAL_INDEX BLOCK(0) * THREAD_COUNT1 * CPU_COUNT1 + BLOCK(1)
 #define __py_int(x) ((int)(x))
 #define __py_float(x) ((float)(x))
 #define __py_sqrt(x) sqrtf(x)
@@ -190,8 +191,7 @@ def make_gpu_func(func, name, info):
     center_on_origin = info['center_on_origin']
     types = info['types']
     argnames = inspect.getargspec(info['func']).args
-    argtypes = ''.join(types[arg][0] for arg in argnames) + 'ii'
-    func.prepare(argtypes)
+    func.prepare(''.join(types[arg][0] for arg in argnames))
     def _gpu_func(*args):
         kernel_args = []
         arrays = []
@@ -297,7 +297,7 @@ class GPUArray(object):
 
     @property
     def _as_parameter_(self):
-        return self.pointer._as_parameter
+        return self.pointer._as_parameter_
 
 from . import arrayfuncs
 def make_array_reduction(name):
