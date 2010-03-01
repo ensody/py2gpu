@@ -164,8 +164,9 @@ class SourceModule(object):
                 kind = types[arg][1]
                 if kind.endswith('Array'):
                     funcargs.append('%s *%s' % (get_arg_type(types[arg][2].type)[1], arg))
-                    funcargs.append('int *__dim_%s' % arg)
-                    callargs.append('%s, __dim_%s' % (arg, arg))
+                    funcargs.extend('int32 __%s_shape%d' % (arg, dim) for dim in range(3))
+                    callargs.append(arg)
+                    callargs.extend('__%s_shape%d' % (arg, dim) for dim in range(3))
                 else:
                     funcargs.append('%s %s' % (kind, arg))
                     callargs.append(arg)
@@ -180,7 +181,7 @@ class SourceModule(object):
         self.source = _base_source % (source, '\n'.join(callers))
         try:
             with open('gpucode.cu', 'r') as fp:
-                changed = fp.read() == self.source
+                changed = fp.read() != self.source
         except IOError:
             changed = True
         if changed:
