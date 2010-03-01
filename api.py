@@ -80,22 +80,22 @@ typedef unsigned short uint16;
 typedef int int32;
 typedef unsigned int uint32;
 
-#define sync __syncthreads
-#define CPU_INDEX0 blockIdx.x
-#define CPU_INDEX1 blockIdx.y
-#define CPU_INDEX2 blockIdx.z
+#define BARRIER __syncthreads()
+#define CPU_INDEX0 ((int32) blockIdx.x)
+#define CPU_INDEX1 ((int32) blockIdx.y)
+#define CPU_INDEX2 ((int32) blockIdx.z)
 #define CPU_INDEX(id) CPU_INDEX##id
-#define CPU_COUNT0 gridDim.x
-#define CPU_COUNT1 gridDim.y
-#define CPU_COUNT2 gridDim.z
+#define CPU_COUNT0 ((int32) gridDim.x)
+#define CPU_COUNT1 ((int32) gridDim.y)
+#define CPU_COUNT2 ((int32) gridDim.z)
 #define CPU_COUNT(id) CPU_COUNT##id
-#define THREAD_INDEX0 threadIdx.x
-#define THREAD_INDEX1 threadIdx.y
-#define THREAD_INDEX2 threadIdx.z
+#define THREAD_INDEX0 ((int32) threadIdx.x)
+#define THREAD_INDEX1 ((int32) threadIdx.y)
+#define THREAD_INDEX2 ((int32) threadIdx.z)
 #define THREAD_INDEX(id) THREAD_INDEX##id
-#define THREAD_COUNT0 blockDim.x
-#define THREAD_COUNT1 blockDim.y
-#define THREAD_COUNT2 blockDim.z
+#define THREAD_COUNT0 ((int32) blockDim.x)
+#define THREAD_COUNT1 ((int32) blockDim.y)
+#define THREAD_COUNT2 ((int32) blockDim.z)
 #define THREAD_COUNT(id) THREAD_COUNT##id
 #define BLOCK(id) (CPU_INDEX(id) * THREAD_COUNT(id) + THREAD_INDEX(id))
 #define GLOBAL_INDEX BLOCK(0) * THREAD_COUNT1 * CPU_COUNT1 + BLOCK(1)

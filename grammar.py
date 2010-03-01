@@ -361,11 +361,19 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         return block, limit, shift
 
     def gen_call(self, call):
+        info = _gpu_funcs[self.func_name]
+        types = info['types']
         name = self.parse(call.func, 'varaccess')
-        args = [self.parse(arg, 'op') for arg in call.args]
+        args = []
+        for arg in [self.parse(arg, 'op') for arg in call.args]:
+            args.append(arg)
+            typeinfo = types.get(arg)
+            if typeinfo and typeinfo[1].endswith('Array'):
+                args.extend('__%s_shape%d' % (arg, dim) for dim in range(3))
+            elif arg == 'NULL':
+                args.extend(3 * ('0',))
         if '->' in name:
             arg, name = name.split('->', 1)
-            info = _gpu_funcs[self.func_name]
             shape = info['blockshapes'].get(arg) or info['threadmemory'].get(arg)
             if info['types'][arg][2].name == 'float32':
                 name = 'f' + name

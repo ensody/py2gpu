@@ -9,6 +9,4 @@ desktop.ini
 nbproject
 boot_generated.py
 gpucode.*
-_driver.dll
-_driver.exp
-_driver.lib
+_driver.*
