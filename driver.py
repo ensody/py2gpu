@@ -12,11 +12,6 @@ LIBEXT = '.dll' if platform.system() == 'Windows' else '.so'
 
 def import_driver():
     parent = os.path.dirname(__file__)
-    source_path = os.path.join(parent, '_driver.cu')
-    driver_path = os.path.join(parent, '_driver' + LIBEXT)
-    options = ['--shared', '-deviceemu', '-DDEVICEEMU=1', '-o', driver_path]
-    if subprocess.call(['nvcc'] + options + [source_path]):
-        raise ValueError('Could not compile GPU/CPU code')
     return ctypeslib.load_library('_driver', parent)
 _driver = import_driver()
 
@@ -148,9 +143,6 @@ class Function(object):
 
 class SourceModule(object):
     def __init__(self, source, options=[]):
-        options = options[:]
-        if emulating:
-            options.extend(['-deviceemu', '-DDEVICEEMU=1'])
         callers = []
         for name, info in _gpu_funcs.items():
             if 'return' in info['types']:
@@ -179,6 +171,11 @@ class SourceModule(object):
             }
             callers.append(_caller % data)
         self.source = _base_source % (source, '\n'.join(callers))
+        options = options[:]
+        options.insert(0, '-O3')
+        if emulating:
+            options.extend(['-deviceemu'])
+            self.source = '#define DEVICEEMU 1\n' + self.source
         try:
             with open('gpucode.cu', 'r') as fp:
                 changed = fp.read() != self.source
