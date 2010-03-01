@@ -200,7 +200,10 @@ def make_gpu_func(func, name, info):
             if isinstance(arg, numpy.ndarray):
                 arg = GPUArray(arg, dtype=types[argname][2])
                 arrays.append(arg)
-            if isinstance(arg, GPUArray):
+            if arg is None:
+                kernel_args.extend((arg,) + 3 * (0,))
+                continue
+            elif isinstance(arg, GPUArray):
                 assert arg.dtype == types[argname][2], \
                     "The data type (%s) of the argument %s doesn't match " \
                     'the function definition (%s)' % (arg.dtype, argname, types[argname][2])

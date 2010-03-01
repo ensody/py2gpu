@@ -113,6 +113,7 @@ EXPORT void __caller__kernel_%(name)s(%(args)s, int __cpus0, int __cpus1, int __
     dim3 __cpu_count(__cpus0, __cpus1, __cpus2);
     dim3 __thread_count(__threads0, __threads1, __threads2);
     __kernel_%(name)s<<< __cpu_count, __thread_count >>>(%(callargs)s);
+    cudaThreadSynchronize();
 }
 '''.lstrip()
 
@@ -172,7 +173,6 @@ class SourceModule(object):
             callers.append(_caller % data)
         self.source = _base_source % (source, '\n'.join(callers))
         options = options[:]
-        options.insert(0, '-O3')
         if emulating:
             options.extend(['-deviceemu'])
             self.source = '#define DEVICEEMU 1\n' + self.source
@@ -184,7 +184,7 @@ class SourceModule(object):
         if changed:
             with open('gpucode.cu', 'w') as fp:
                 fp.write(self.source)
-            options.extend(['--shared', '-o', 'gpucode'+LIBEXT])
+            options.extend(['--shared', '--keep', '-O3', '-o', 'gpucode'+LIBEXT])
             if subprocess.call(['nvcc'] + options + ['gpucode.cu']):
                 raise ValueError('Could not compile GPU/CPU code')
         self.lib = ctypeslib.load_library('gpucode', '.')

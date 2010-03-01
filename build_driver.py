@@ -30,4 +30,4 @@ if __name__ == '__main__':
             emulate = True
         else:
             usage()
-    build_driver()
+    build_driver(emulate=emulate)
