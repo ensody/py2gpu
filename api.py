@@ -98,7 +98,6 @@ typedef unsigned int uint32;
 #define THREAD_COUNT2 ((int32) blockDim.z)
 #define THREAD_COUNT(id) THREAD_COUNT##id
 #define BLOCK(id) (CPU_INDEX(id) * THREAD_COUNT(id) + THREAD_INDEX(id))
-#define GLOBAL_INDEX BLOCK(0) * THREAD_COUNT1 * CPU_COUNT1 + BLOCK(1)
 #define __py_int(x) ((int)(x))
 #define __py_float(x) ((float)(x))
 #define __py_sqrt(x) sqrtf(x)
