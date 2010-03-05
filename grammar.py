@@ -4,6 +4,8 @@ Python ast to C++ converter
 import ast
 from pymeta.grammar import OMeta
 from pymeta.runtime import ParseError, EOFError
+from math import sqrt
+import numpy
 
 # Globals for storing type information about registered functions
 _gpu_funcs = {}
@@ -63,7 +65,6 @@ op = binop
    | anyvar
    | call
    | compare
-
 
 assignop = name | subscript(True)
 assign = node('Assign'):n -> '%s = %s' % (' = '.join([self.parse(target, 'assignop') for target in n.targets]), self.parse(n.value, 'oporassign'))
@@ -275,10 +276,33 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         info['funcnode'] = func
 
         types = info['types']
+        threadmemory = info['threadmemory']
         args = set(arg.id for arg in func.args.args)
-        vars = set(types.keys()).symmetric_difference(args)
-        vars = '\n'.join('%s %s;' % (types[var][1], var) for var in vars
+        vars = set(types.keys()).symmetric_difference(
+            args).symmetric_difference(threadmemory.keys())
+        vars = '\n'.join('%s %s;' % (types[var][3], var) for var in vars
                          if var != 'return')
+
+        # Calculate register requirements before parsing the function body
+        maxthreads = None
+        # TODO: actually calculate the real number of unused registers
+        unused_registers = 8192 - 600
+        needed_registers = 0
+        for var, shape in threadmemory.items():
+            size = numpy.array(shape).prod()
+            needed_registers += size
+            vars += '\n%s %s[%d];' % (types[var][3], var, size)
+        if needed_registers:
+            threads = unused_registers / needed_registers
+            # If there aren't enough registers we fall back to local memory
+            # and use a relatively high number of threads to compensate for
+            # the slower memory access
+            if threads < 96:
+                threads = 64
+            x_threads = int(sqrt(threads))
+            maxthreads = (threads // x_threads, x_threads, 1)
+        info['maxthreads'] = maxthreads
+
         if vars:
             vars += '\n\n'
         data = {
@@ -296,42 +320,39 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         blockinit = []
         blockshapes = info['blockshapes']
         overlapping = info['overlapping']
-        threadmemory = info['threadmemory']
         center_on_origin = info['center_on_origin']
+
         args = []
         for arg in func.args.args:
             origarg = arg = arg.id
             kind = types[arg][1]
 
-            if kind.endswith('Array') and arg in blockshapes or arg in threadmemory:
+            if kind.endswith('Array') and arg in blockshapes:
                 arg = '__array_' + arg
-
-            tmshape = threadmemory.get(origarg)
-            if tmshape:
-                blockinit.append('%s *%s = %s + GLOBAL_INDEX;' % (
-                    types[origarg][3], arg, origarg))
 
             shape = blockshapes.get(origarg)
             if shape:
                 offsetinit = []
+                blockinit.append('%s *%s;' % (types[origarg][3], arg))
+                blockinit.append('if (%s != NULL) {' % origarg)
                 for dim, dimlength in enumerate(shape):
                     block, limit, shift = self.get_block_init(origarg, dim,
                         dimlength, origarg in overlapping, center_on_origin)
-                    blockinit.append('if (%s >= %s)\n    return;' % (block, limit))
+                    blockinit.append('    if (%s >= %s)\n        return;' % (block, limit))
                     if dim == len(shape) - 1:
                         offsetinit.append(shift)
                     else:
-                        offsetinit.append('__%s_shape%d * %s' % (origarg, dim+1, shift))
-                blockinit.append('%s *%s = %s + %s;' % (
-                    types[origarg][3], arg, origarg, ' + '.join(offsetinit)))
+                        offsetinit.append('%s * %s' % (' * '.join('__%s_shape%d' % (origarg, subdim) for subdim in range(dim+1, len(shape))), shift))
+                blockinit.append('    %s = %s + %s;' % (
+                    arg, origarg, ' + '.join(offsetinit)))
+                blockinit.append('} else {')
+                blockinit.append('    %s = %s;' % (arg, origarg))
+                blockinit.append('}')
 
             args.append(arg)
 
             if kind.endswith('Array'):
-                if tmshape:
-                    args.extend(str(x) for x in tmshape + (3 - len(tmshape)) * (1,))
-                else:
-                    args.extend('__%s_shape%d' % (origarg, dim) for dim in range(3))
+                args.extend('__%s_shape%d' % (origarg, dim) for dim in range(3))
 
         bodydata = {
             'declarations': '%s' % '\n'.join(blockinit),
@@ -361,6 +382,8 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
         return block, limit, shift
 
     def gen_call(self, call):
+        assert call.starargs is None
+        assert call.kwargs is None
         info = _gpu_funcs[self.func_name]
         types = info['types']
         name = self.parse(call.func, 'varaccess')
@@ -369,26 +392,32 @@ class Py2GPUGrammar(OMeta.makeGrammar(py2gpu_grammar, vars, name="Py2CGrammar"))
             args.append(arg)
             typeinfo = types.get(arg)
             if typeinfo and typeinfo[1].endswith('Array'):
-                args.extend('__%s_shape%d' % (arg, dim) for dim in range(3))
+                args.extend(self._get_dim_args(arg))
             elif arg == 'NULL':
                 args.extend(3 * ('0',))
         if '->' in name:
             arg, name = name.split('->', 1)
-            shape = info['blockshapes'].get(arg) or info['threadmemory'].get(arg)
             if info['types'][arg][2].name == 'float32':
                 name = 'f' + name
+            shape = info['blockshapes'].get(arg) or info['threadmemory'].get(arg)
             name += '%dd' % len(shape)
-            dimargs = ', '.join('__%s_shape%d' % (arg, dim) for dim in range(3))
+            dimargs = ', '.join(self._get_dim_args(arg))
             args.insert(0, '%s, %s' % (arg, dimargs))
             args.extend(str(arg) for arg in shape)
             name = '__array_' + name
         elif name in ('int', 'float', 'min', 'max', 'sqrt', 'log', 'abs'):
             # These functions are specialized via templates
             name = '__py_' + name
-        assert call.starargs is None
-        assert call.kwargs is None
-        assert call.keywords == []
         return '%s(%s)' % (name, ', '.join(args))
+
+    def _get_dim_args(self, arg):
+        info = _gpu_funcs[self.func_name]
+        threadmemory = info['threadmemory']
+        shape = threadmemory.get(arg)
+        if shape:
+            shape += (3 - len(shape)) * (1,)
+            return ('%d' % dim for dim in shape)
+        return ('__%s_shape%d' % (arg, dim) for dim in range(3))
 
     def gen_for(self, node, level):
         assert not node.orelse, 'else clause not supported in for loops'
