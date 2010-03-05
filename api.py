@@ -167,6 +167,9 @@ class UInt32Array(ArrayType):
 class Int8Array(ArrayType):
     dtype = numpy.int8
 
+class UInt8Array(ArrayType):
+    dtype = numpy.uint8
+
 class FloatArray(ArrayType):
     dtype = numpy.float32
 
@@ -189,6 +192,7 @@ def make_gpu_func(func, name, info):
     threadmemory = info['threadmemory']
     overlapping = info['overlapping']
     center_on_origin = info['center_on_origin']
+    maxthreads = info['maxthreads']
     types = info['types']
     argnames = inspect.getargspec(info['func']).args
     func.prepare(''.join(types[arg][0] for arg in argnames))
@@ -249,7 +253,7 @@ def make_gpu_func(func, name, info):
             kernel_args.append(arg)
 
         # Determine number of blocks
-        grid, block = driver.splay(dims)
+        grid, block = driver.splay(dims, maxthreads=maxthreads)
         func(grid, block, *kernel_args)
         # Now copy temporary arrays back
         for gpuarray in arrays:
@@ -273,7 +277,7 @@ def compile_gpu_code():
         info['gpumodule'] = mod
 
 class GPUArray(object):
-    def __init__(self, data, dtype=None, copy_to_device=True, stream=None):
+    def __init__(self, data, dtype=None, copy_to_device=True):
         self.data = data
         if dtype:
             data = data.astype(dtype)

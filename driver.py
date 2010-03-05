@@ -70,7 +70,7 @@ def to_device(data):
     memcpy_htod(mem, data)
     return mem
 
-def splay(dims):
+def splay(dims, maxthreads=()):
     grid = []
     block = []
     dimcount = len(dims)
@@ -81,9 +81,12 @@ def splay(dims):
             cpus = threads = 1
         else:
             # TODO: Optimize by calculating register usage
-            threads = 64 if dimcount == 1 else 16
-            if (dimcount == 1 and size) < 256 or (dimcount > 1 and size < 64):
-                threads /= 2
+            if maxthreads is not None and len(maxthreads) > dim and maxthreads[dim]:
+                threads = maxthreads[dim]
+            else:
+                threads = 64 if dimcount == 1 else 16
+                if (dimcount == 1 and size < 256) or (dimcount > 1 and size < 64):
+                    threads //= 2
             cpus = (size + threads - 1) // threads
         grid.append(cpus)
         block.append(threads)
