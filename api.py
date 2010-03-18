@@ -201,7 +201,7 @@ def make_gpu_func(func, name, info):
         dims = None
         for argname, arg in zip(argnames, args):
             if isinstance(arg, numpy.ndarray):
-                arg = GPUArray(arg, dtype=types[argname][2])
+                arg = GPUArray(arg)
                 arrays.append(arg)
             if arg is None:
                 kernel_args.extend((arg,) + 3 * (0,))
@@ -253,6 +253,7 @@ def make_gpu_func(func, name, info):
 
         # Determine number of blocks
         grid, block = driver.splay(dims, maxthreads=maxthreads)
+#        print name, grid, block, kernel_args
         func(grid, block, *kernel_args)
         # Now copy temporary arrays back
         for gpuarray in arrays:
@@ -276,13 +277,10 @@ def compile_gpu_code():
         info['gpumodule'] = mod
 
 class GPUArray(object):
-    def __init__(self, data, dtype=None, copy_to_device=True):
+    def __init__(self, data, copy_to_device=True):
+        assert data.flags.contiguous, \
+            'You have to pass contiguous arrays to the GPU (use .copy())'
         self.data = data
-        if dtype:
-            data = data.astype(dtype)
-        else:
-            dtype = data.dtype
-        self.dtype = dtype
 
         # data
         if copy_to_device:
@@ -290,12 +288,19 @@ class GPUArray(object):
         else:
             self.pointer = driver.mem_alloc_like(data)
 
+    def __repr__(self):
+        return '<GPUArray>'
+
     def copy_from_device(self):
         driver.memcpy_dtoh(self.data, self.pointer)
 
     @property
     def shape(self):
         return self.data.shape
+
+    @property
+    def dtype(self):
+        return self.data.dtype
 
     @property
     def size(self):

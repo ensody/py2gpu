@@ -77,8 +77,11 @@ def splay(dims, maxthreads=()):
     if dimcount < 3:
         dims += (3 - dimcount) * (1,)
     for dim, size in enumerate(dims):
-        if dim == 2 and size == 1:
+        if size == 1:
             cpus = threads = 1
+        elif dim == 2:
+            threads = size
+            cpus = 1
         else:
             # TODO: Optimize by calculating register usage
             if maxthreads is not None and len(maxthreads) > dim and maxthreads[dim]:
@@ -87,6 +90,9 @@ def splay(dims, maxthreads=()):
                 threads = 64 if dimcount == 1 else 16
                 if (dimcount == 1 and size < 256) or (dimcount > 1 and size < 64):
                     threads //= 2
+            # For 3d images we have to make one of the first two dimensions smaller
+            if dim == 0:
+                threads //= dims[2]
             cpus = (size + threads - 1) // threads
         grid.append(cpus)
         block.append(threads)
