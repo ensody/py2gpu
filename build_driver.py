@@ -1,24 +1,10 @@
 import os
-import platform
-import subprocess
 import sys
-
-LIBEXT = '.dll' if platform.system() == 'Windows' else '.so'
-
-def build_driver(emulate=False):
-    print 'Building', 'in emulation mode' if emulate else 'for GPU (use --emulate for CPU emulation)'
-    parent = os.path.dirname(__file__)
-    source_path = os.path.join(parent, 'driver.cu')
-    driver_path = os.path.join(parent, '_driver' + LIBEXT)
-    options = ['--shared', '-O3', '-o', driver_path]
-    if emulate:
-        options.extend(['-deviceemu', '-DDEVICEEMU=1'])
-    if subprocess.call(['nvcc'] + options + [source_path]):
-        raise ValueError('Could not compile GPU/CPU code')
-    print 'Done'
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from py2gpu.build_module import build_module
 
 def usage():
-    print 'Usage: build_driver.py [--emulate]'
+    print 'Usage: %s [--emulate]' % os.path.basename(sys.argv[0])
     sys.exit(-1)
 
 if __name__ == '__main__':
@@ -30,4 +16,4 @@ if __name__ == '__main__':
             emulate = True
         else:
             usage()
-    build_driver(emulate=emulate)
+    build_module(['gpucode.cu'], emulate=emulate)

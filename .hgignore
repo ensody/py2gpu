@@ -10,3 +10,7 @@ nbproject
 boot_generated.py
 gpucode.*
 _driver.*
+_*.dll
+_*.exp
+_*.so
+_*.lib
