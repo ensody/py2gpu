@@ -17,21 +17,17 @@ _driver = import_driver()
 
 emulating = c_int.in_dll(_driver, 'emulating')
 
-_alloc = _driver.drv_alloc
-_alloc.argtypes = [c_int]
-_alloc.restype = c_void_p
+_driver.drv_alloc.argtypes = [c_int]
+_driver.drv_alloc.restype = c_void_p
 
-_free = _driver.drv_free
-_free.argtypes = [c_void_p]
-_free.restype = c_int
+_driver.drv_free.argtypes = [c_void_p]
+_driver.drv_free.restype = c_int
 
-_htod = _driver.drv_htod
-_htod.argtypes = [c_void_p, ctypeslib.ndpointer(), c_int]
-_htod.restype = c_int
+_driver.drv_htod.argtypes = [c_void_p, ctypeslib.ndpointer(), c_int]
+_driver.drv_htod.restype = c_int
 
-_dtoh = _driver.drv_dtoh
-_dtoh.argtypes = [ctypeslib.ndpointer(), c_void_p, c_int]
-_dtoh.restype = c_int
+_driver.drv_dtoh.argtypes = [ctypeslib.ndpointer(), c_void_p, c_int]
+_driver.drv_dtoh.restype = c_int
 
 class GPUError(Exception):
     pass
@@ -41,7 +37,7 @@ class GPUMemory(object):
         self.data = data
 
     def __del__(self):
-        if _free(self.data):
+        if _driver.drv_free(self.data):
             raise GPUError('Freeing of GPU data failed!')
 
     @property
@@ -49,7 +45,7 @@ class GPUMemory(object):
         return self.data
 
 def mem_alloc(size):
-    data = _alloc(size)
+    data = _driver.drv_alloc(size)
     if data is None:
         raise GPUError('Memory allocation failed!')
     return GPUMemory(data)
@@ -58,11 +54,11 @@ def mem_alloc_like(data):
     return mem_alloc(data.nbytes)
 
 def memcpy_htod(target, source):
-    if _htod(target, source, source.nbytes):
+    if _driver.drv_htod(target, source, source.nbytes):
         raise GPUError('Copying to GPU failed!')
 
 def memcpy_dtoh(target, source):
-    if _dtoh(target, source, target.nbytes):
+    if _driver.drv_dtoh(target, source, target.nbytes):
         raise GPUError('Copying to host failed!')
 
 def to_device(data):
