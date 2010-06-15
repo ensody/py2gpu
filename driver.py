@@ -7,8 +7,7 @@ import subprocess
 
 from .grammar import _gpu_funcs, indent_source
 from .utils import get_arg_type
-
-LIBEXT = '.dll' if platform.system() == 'Windows' else '.so'
+from .build_module import LIBEXT
 
 def import_driver():
     parent = os.path.dirname(__file__)

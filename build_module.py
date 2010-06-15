@@ -4,7 +4,8 @@ import platform
 import subprocess
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from py2gpu.driver import LIBEXT
+
+LIBEXT = '.dll' if platform.system() == 'Windows' else '.so'
 
 def build_module(names, emulate=False):
     print 'Building', 'in emulation mode' if emulate else 'for GPU (use --emulate for CPU emulation)'
