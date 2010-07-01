@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+from setuptools import setup
 import os
 
 DESCRIPTION = 'Python to GPU compiler'
@@ -10,7 +10,7 @@ except:
     pass
 
 setup(name='py2gpu',
-      packages=find_packages(),
+      packages=['py2gpu'],
       author='Waldemar Kornewald',
       include_package_data=True,
       description=DESCRIPTION,
