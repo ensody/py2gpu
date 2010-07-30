@@ -1,7 +1,13 @@
 """
 Python ast to C++ converter
 """
-import ast
+try:
+    import ast
+except ImportError:
+    import _ast as ast
+    def parse(expr, filename='<unknown>', mode='exec'):
+        return compile(expr, filename, mode, ast.PyCF_ONLY_AST)
+    ast.parse = parse
 from pymeta.grammar import OMeta
 from pymeta.runtime import ParseError, EOFError
 from math import sqrt
