@@ -5,7 +5,7 @@ class ArrayType(object):
 
 def get_arg_type(arg):
     if issubclass(arg, ArrayType):
-        dtype_chars = 'P' + 3*numpy.dtype(numpy.int).char
+        dtype_chars = 'P' + 3*numpy.dtype(numpy.int32).char
         return dtype_chars, arg.__name__, numpy.dtype(arg.dtype), \
                get_arg_type(arg.dtype)[1]
     dtype = numpy.dtype(arg)

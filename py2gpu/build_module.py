@@ -16,9 +16,15 @@ def build_module(names, emulate=False):
     source_path = name
     driver_path = os.path.join(parent, '_%s%s' % (base, LIBEXT))
     sdk_path = os.environ['NVSDKCUDA_ROOT']
+    if platform.system() == 'Windows':
+        sdk_lib_dir = os.path.join('common', 'lib')
+    else:
+        sdk_lib_dir = 'lib'
     options = ['--shared', '-O3', '-o', driver_path,
-               '-I', os.path.join(sdk_path, 'common/inc'),
-               '-L', os.path.join(sdk_path, 'common/lib')]
+               '-I', os.path.join(sdk_path, 'common', 'inc'),
+               '-L', os.path.join(sdk_path, sdk_lib_dir)]
+    if platform.system() != 'Windows' and platform.architecture()[0] == '64bit':
+        options.extend(['--compiler-options', '-fPIC'])
     if emulate:
         options.extend(['-deviceemu', '-DDEVICEEMU=1'])
     if subprocess.call(['nvcc'] + options + [source_path] + extra):
