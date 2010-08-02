@@ -1,4 +1,4 @@
-from ctypes import c_int, c_long, c_float, c_void_p, c_double
+from ctypes import c_int, c_long, c_float, c_void_p, c_double, c_short
 import numpy
 from numpy import ctypeslib
 import os
@@ -127,6 +127,7 @@ _argtypes = {
     'l': c_long,
     'f': c_float,
     'd': c_double,
+    'h': c_short,
 }
 
 class Function(object):
@@ -181,14 +182,18 @@ class SourceModule(object):
             options.extend(['-deviceemu'])
             self.source = '#define DEVICEEMU 1\n' + self.source
         try:
-            with open('gpucode.cu', 'r') as fp:
-                changed = fp.read() != self.source
+            fp = open('gpucode.cu', 'r')
+            changed = fp.read() != self.source
+            fp.close()
         except IOError:
             changed = True
         if changed:
-            with open('gpucode.cu', 'w') as fp:
-                fp.write(self.source)
+            fp = open('gpucode.cu', 'w')
+            fp.write(self.source)
+            fp.close()
             options.extend(['--shared', '--keep', '-O3', '-o', 'gpucode'+LIBEXT])
+            if platform.system() != 'Windows' and platform.architecture()[0] == '64bit':
+                options.extend(['--compiler-options', '-fPIC'])
             if subprocess.call(['nvcc'] + options + ['gpucode.cu']):
                 raise ValueError('Could not compile GPU/CPU code')
         self.lib = ctypeslib.load_library('gpucode', '.')

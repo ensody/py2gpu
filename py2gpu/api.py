@@ -1,9 +1,8 @@
-import ast
 from functools import wraps
 import inspect
 import numpy
 from . import driver
-from .grammar import _gpu_funcs, convert, make_prototype
+from .grammar import ast, _gpu_funcs, convert, make_prototype
 from .utils import get_arg_type, ArrayType
 from textwrap import dedent
 
@@ -193,7 +192,7 @@ def make_gpu_func(func, name, info):
     center_on_origin = info['center_on_origin']
     maxthreads = info['maxthreads']
     types = info['types']
-    argnames = inspect.getargspec(info['func']).args
+    argnames = inspect.getargspec(info['func'])[0]
     func.prepare(''.join(types[arg][0] for arg in argnames))
     def _gpu_func(*args):
         kernel_args = []
