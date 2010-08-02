@@ -16,4 +16,4 @@ if __name__ == '__main__':
             emulate = True
         else:
             usage()
-    build_module(['gpucode.cu'], emulate=emulate)
+    build_module(['driver.cu'], emulate=emulate)
