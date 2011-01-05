@@ -2,6 +2,34 @@ from py2gpu.api import blockwise, Int32Array, FloatArray
 from numpy import float32
 
 @blockwise({'data': ('height', 'width')},
+           {'data': Int32Array, ('match', 'return', 'height', 'width'): int})
+def __array_max2d(data, height, width):
+    match = data[0, 0]
+    for row in range(height):
+        for col in range(width):
+            if match < data[row, col]:
+                match = data[row, col]
+    return match
+
+blockwise({'data': ('height', 'width')},
+          {'data': FloatArray, ('height', 'width'): int, ('match', 'return'): float32},
+          name='__array_fmax2d')(__array_max2d)
+
+@blockwise({'data': ('height', 'width')},
+           {'data': Int32Array, ('match', 'return', 'height', 'width'): int})
+def __array_min2d(data, height, width):
+    match = data[0, 0]
+    for row in range(height):
+        for col in range(width):
+            if match > data[row, col]:
+                match = data[row, col]
+    return match
+
+blockwise({'data': ('height', 'width')},
+          {'data': FloatArray, ('height', 'width'): int, ('match', 'return'): float32},
+          name='__array_fmin2d')(__array_min2d)
+
+@blockwise({'data': ('height', 'width')},
            {'data': Int32Array, ('sum', 'return', 'height', 'width'): int})
 def __array_sum2d(data, height, width):
     sum = 0
