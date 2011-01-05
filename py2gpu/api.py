@@ -63,8 +63,8 @@ def blockwise(blockshapes, types, threadmemory={}, overlapping=True, center_on_o
         })
         @wraps(func)
         def _call_blockwise(*args):
-            assert 'gpufunc' in info, \
-                'You have to call compile_gpu_code() before executing a GPU function.'
+            if 'gpufunc' not in info:
+                compile_gpu_code()
             gpufunc = info['gpufunc']
             return gpufunc(*args)
         _call_blockwise._py2gpu_original = func
